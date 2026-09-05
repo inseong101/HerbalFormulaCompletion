@@ -6,9 +6,8 @@ import csv
 import hashlib
 import io
 import json
-import pickle
 import tarfile
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -217,7 +216,6 @@ def main():
     parser.add_argument(
         "--layers", type=Path, default=Path("data/recipe1m/recipe1M_layers.tar.gz")
     )
-    parser.add_argument("--official-vocabulary", type=Path, default=Path("data/recipe1m/ingr_vocab.pkl"))
     parser.add_argument("--output-dir", type=Path, default=Path("work/food"))
     parser.add_argument("--ingredient-threshold", type=int, default=10)
     args = parser.parse_args()
@@ -255,6 +253,7 @@ def main():
 
     composition_counts = Counter()
     examples = {}
+    example_titles = defaultdict(list)
     included = 0
     dropped = 0
     raw_occurrences = 0
@@ -278,6 +277,8 @@ def main():
         included += 1
         composition_counts[composition] += 1
         examples.setdefault(composition, (layer["id"], layer["title"], layer["partition"]))
+        if layer["title"] not in example_titles[composition] and len(example_titles[composition]) < 5:
+            example_titles[composition].append(layer["title"])
 
     composition_rows = []
     for composition, weight in composition_counts.items():
@@ -325,11 +326,6 @@ def main():
          for size in sorted(size_counts)),
     )
 
-    official_set = None
-    if args.official_vocabulary.exists():
-        with args.official_vocabulary.open("rb") as handle:
-            official_set = set(pickle.load(handle)) - {"<end>", "<pad>"}
-    reconstructed = set(canonical_counts)
     metadata = {
         "source": "Recipe1M det_ingrs.json + layer1.json",
         "method": "Inverse Cooking build_vocab.py-compatible preprocessing",
@@ -337,7 +333,7 @@ def main():
         "first_pass_eligible_recipes": first_pass_eligible,
         "included_recipes_after_canonical_mapping": included,
         "dropped_after_canonical_mapping": dropped,
-        "canonical_ingredients": len(reconstructed),
+        "canonical_ingredients": len(canonical_counts),
         "aliases": len(alias_to_canonical),
         "raw_valid_ingredient_occurrences_in_eligible_recipes": raw_occurrences,
         "mapped_ingredient_occurrences": mapped_occurrences,
@@ -345,14 +341,21 @@ def main():
         "unique_compositions": len(composition_rows),
         "duplicate_recipe_compositions": included - len(composition_rows),
         "ingredient_frequency_threshold_train_only": args.ingredient_threshold,
-        "official_vocab_size": len(official_set) if official_set else None,
-        "official_vocab_exact_set_match": official_set == reconstructed if official_set else None,
         "duplicate_policy": "merge identical complete standardized ingredient sets and preserve source count as weight",
     }
     (args.output_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    print(json.dumps(metadata, ensure_ascii=False, indent=2))
+    print("Recipes:", f"{total_records:,}")
+    print("Recipes with 2–19 standardized ingredients:", f"{included:,}")
+    print("Unique compositions:", f"{len(composition_rows):,}")
+    target = ("cheese", "garlic", "oil", "paprika", "pepper", "potato", "salt")
+    if composition_counts[target] == 19:
+        print("Example titles:", " | ".join(example_titles[target]))
+        print("Example composition:", "|".join(target))
+        print("Weight:", composition_counts[target])
+    print("Saved: work/food/unique_compositions.csv")
+    print("Saved: work/food/composition_size_distribution.csv")
 
 
 if __name__ == "__main__":
