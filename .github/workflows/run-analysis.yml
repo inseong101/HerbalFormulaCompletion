@@ -7,6 +7,9 @@ on:
       - analysis.py
       - requirements.txt
       - data/**
+      - raw_pipeline/**
+      - DATA.md
+      - README.md
       - .github/workflows/run-analysis.yml
 
 permissions:
@@ -27,4 +30,4 @@ jobs:
           name: manuscript-output
           path: |
             figures/
-            tables/
+            data/processed/herbal/
