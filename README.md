@@ -17,10 +17,7 @@ The terminal shows the raw fields, one raw record, preprocessing counts, one dup
 
 ```text
 Colab.ipynb       Colab run
-run.py            Analysis entry point
-src/herbs.py      Herbal preprocessing
-src/food.py       Food preprocessing
-src/figure.py     Figure 1
+run.py            Complete analysis
 data/herbal/      Five textbook CSV files
 data/recipe1m/    Recipe1M files
 work/             Generated tables
