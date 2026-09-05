@@ -4,9 +4,12 @@
 import argparse
 import csv
 import hashlib
+import io
 import json
 import pickle
+import tarfile
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 
 from tqdm import tqdm
@@ -31,10 +34,28 @@ BASE_WORDS = [
 ]
 
 
+@contextmanager
+def open_json(path: Path):
+    if path.name.endswith(".tar.gz"):
+        archive = tarfile.open(path, "r:gz")
+        binary = archive.extractfile("layer1.json")
+        if binary is None:
+            archive.close()
+            raise FileNotFoundError(f"layer1.json이 압축파일에 없습니다: {path}")
+        try:
+            with io.TextIOWrapper(binary, encoding="utf-8") as handle:
+                yield handle
+        finally:
+            archive.close()
+    else:
+        with path.open(encoding="utf-8") as handle:
+            yield handle
+
+
 def stream_json_array(path: Path, chunk_size=1 << 20):
     """큰 JSON 배열을 메모리에 모두 올리지 않고 한 레코드씩 읽는다."""
     decoder = json.JSONDecoder()
-    with path.open(encoding="utf-8") as handle:
+    with open_json(path) as handle:
         buffer = ""
         position = 0
         started = False
@@ -192,10 +213,12 @@ def write_csv(path, fields, rows):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--detections", type=Path, default=Path("data/raw/recipe1m/det_ingrs.json"))
-    parser.add_argument("--layers", type=Path, default=Path("data/raw/recipe1m/layer1.json"))
-    parser.add_argument("--official-vocabulary", type=Path, default=Path("data/raw/recipe1m/ingr_vocab.pkl"))
-    parser.add_argument("--output-dir", type=Path, default=Path("data/processed/food"))
+    parser.add_argument("--detections", type=Path, default=Path("data/recipe1m/det_ingrs.json"))
+    parser.add_argument(
+        "--layers", type=Path, default=Path("data/recipe1m/recipe1M_layers.tar.gz")
+    )
+    parser.add_argument("--official-vocabulary", type=Path, default=Path("data/recipe1m/ingr_vocab.pkl"))
+    parser.add_argument("--output-dir", type=Path, default=Path("work/food"))
     parser.add_argument("--ingredient-threshold", type=int, default=10)
     args = parser.parse_args()
 

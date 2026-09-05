@@ -1,22 +1,25 @@
-name: Run analysis
+name: Analysis
 
 on:
   workflow_dispatch:
   push:
     paths:
-      - analysis.py
+      - run.py
       - requirements.txt
-      - data/**
-      - raw_pipeline/**
-      - DATA.md
+      - src/**
+      - data/herbal/**
+      - data/food.csv
+      - data/results.xlsx
+      - Colab.ipynb
       - README.md
-      - .github/workflows/run-analysis.yml
+      - data/README.md
+      - .github/workflows/run.yml
 
 permissions:
   contents: read
 
 jobs:
-  analysis:
+  figures:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -24,10 +27,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python analysis.py
+      - run: python run.py
       - uses: actions/upload-artifact@v6
         with:
-          name: manuscript-output
-          path: |
-            figures/
-            data/processed/herbal/
+          name: manuscript-figures
+          path: figures/

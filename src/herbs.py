@@ -148,8 +148,8 @@ def preprocess(input_dir: Path, output_dir: Path, minimum_size=2, maximum_size=1
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", type=Path, default=Path("data/raw/herbal"))
-    parser.add_argument("--output-dir", type=Path, default=Path("data/processed/herbal"))
+    parser.add_argument("--input-dir", type=Path, default=Path("data/herbal"))
+    parser.add_argument("--output-dir", type=Path, default=Path("work/herbal"))
     args = parser.parse_args()
     metadata, collapsed, _, _ = preprocess(args.input_dir, args.output_dir)
     print(json.dumps(metadata, ensure_ascii=False, indent=2))
