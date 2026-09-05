@@ -1,0 +1,2 @@
+# 공개 원자료의 바이트와 줄바꿈을 그대로 보존한다.
+data/raw/herbal/*.csv -text
