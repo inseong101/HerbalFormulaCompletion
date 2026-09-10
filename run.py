@@ -462,11 +462,20 @@ def make_figure1(herbal_counts, food_counts):
     sizes = list(range(2, 20))
     food = [food_counts[size] for size in sizes]
     herbal = [herbal_counts[size] for size in sizes]
+    food_total = sum(food)
+    herbal_total = sum(herbal)
+    food_percent = [100 * count / food_total for count in food]
+    herbal_percent = [100 * count / herbal_total for count in herbal]
 
-    print("Ingredients | Food before matching | Herbal")
-    for size, food_count, herbal_count in zip(sizes, food, herbal):
-        print(f"{size:>11} | {food_count:>20,} | {herbal_count:>6,}")
-    print(f"Totals: food={sum(food):,}, herbal={sum(herbal):,}")
+    print("Ingredients | Food n (%)          | Herbal n (%)")
+    for size, food_count, food_pct, herbal_count, herbal_pct in zip(
+        sizes, food, food_percent, herbal, herbal_percent
+    ):
+        print(
+            f"{size:>11} | {food_count:>7,} ({food_pct:>5.2f}%) | "
+            f"{herbal_count:>5,} ({herbal_pct:>5.2f}%)"
+        )
+    print(f"Totals: food={food_total:,}, herbal={herbal_total:,}")
 
     mpl.rcParams.update({
         "font.family": "sans-serif",
@@ -481,18 +490,17 @@ def make_figure1(herbal_counts, food_counts):
     fig, ax = plt.subplots(figsize=(7.2, 3.9))
     width = 0.38
     ax.bar(
-        [size - width / 2 for size in sizes], food, width,
+        [size - width / 2 for size in sizes], food_percent, width,
         color="#bdbdbd", edgecolor="#555555", linewidth=0.5,
         label="Food before matching (n=762,996)",
     )
     ax.bar(
-        [size + width / 2 for size in sizes], herbal, width,
+        [size + width / 2 for size in sizes], herbal_percent, width,
         color="#222222", edgecolor="#222222", linewidth=0.5,
         label="Herbal (n=2,009)",
     )
-    ax.set_yscale("log")
     ax.set_xlabel("Number of ingredients")
-    ax.set_ylabel("Unique compositions (log scale)")
+    ax.set_ylabel("Compositions (%)")
     ax.set_xticks(sizes)
     ax.legend(frameon=False)
 
