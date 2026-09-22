@@ -33,6 +33,7 @@ import hashlib
 import io
 import json
 import re
+import random
 import tarfile
 import unicodedata
 from collections import Counter, defaultdict
@@ -494,6 +495,130 @@ def preprocess_herbal(input_dir, output_dir):
     return metadata, rows, size_counts
 
 
+def read_rows(path):
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def matched_food_samples(herbal_path, food_path, output_dir, replicates=100, seed=20260823):
+    """Sample unique compositions without replacement within each independent draw."""
+    if replicates < 1:
+        raise ValueError("At least one food sample is required")
+    herbs = read_rows(herbal_path)
+    foods = read_rows(food_path)
+    needed = Counter(int(row["herb_count"]) for row in herbs)
+    if not needed or not all(2 <= size <= 19 for size in needed):
+        raise ValueError("Herbal compositions must contain 2–19 herbs")
+    by_size = defaultdict(list)
+    source_ids = set()
+    for row in sorted(foods, key=lambda row: row["composition_id"]):
+        if row["composition_id"] in source_ids:
+            raise ValueError("Duplicate food composition IDs")
+        source_ids.add(row["composition_id"])
+        by_size[int(row["ingredient_count"])].append(row)
+    if len({row["composition_id"] for row in herbs}) != len(herbs):
+        raise ValueError("Duplicate herbal composition IDs")
+    for size, number in needed.items():
+        if len(by_size[size]) < number:
+            raise ValueError(f"Insufficient food compositions at size {size}")
+    membership, checks, summaries = [], [], []
+    for replicate in range(1, replicates + 1):
+        rng = random.Random(seed + replicate - 1)
+        sample = [row for size in sorted(needed)
+                  for row in rng.sample(by_size[size], needed[size])]
+        counts = Counter(int(row["ingredient_count"]) for row in sample)
+        ids = [row["composition_id"] for row in sample]
+        if len(ids) != len(set(ids)) or counts != needed:
+            raise AssertionError("Food matching validation failed")
+        for row in sample:
+            membership.append({"replicate": replicate,
+                               "composition_id": row["composition_id"],
+                               "ingredient_count": int(row["ingredient_count"]),
+                               "weight": int(row["weight"])})
+        for size in range(2, 20):
+            checks.append({"replicate": replicate, "ingredient_count": size,
+                           "herbal_count": needed[size], "food_count": counts[size],
+                           "matches": counts[size] == needed[size]})
+        summaries.append({"replicate": replicate, "seed": seed + replicate - 1,
+                          "unique_compositions": len(ids),
+                          "source_record_weight_sum": sum(int(row["weight"]) for row in sample),
+                          "sorted_id_sha256": hashlib.sha256("\n".join(sorted(ids)).encode()).hexdigest()})
+    for name, rows in (("membership.csv", membership), ("size_checks.csv", checks),
+                       ("sample_summary.csv", summaries)):
+        write_csv(output_dir / name, tuple(rows[0]), rows)
+    metadata = {"replicates": replicates, "seed": seed,
+                "seed_rule": "seed + replicate - 1",
+                "food_population_unique": len(foods), "compositions_per_sample": len(herbs),
+                "within_sample": "without replacement, uniform within each ingredient-count stratum",
+                "between_samples": "independent draws; compositions may recur across samples",
+                "weight_policy": "source multiplicity retained for later training; not used as sampling probability",
+                "all_size_checks_passed": True,
+                "fold_assignment_and_model_evaluation": "not performed in this step"}
+    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    print(json.dumps(metadata, ensure_ascii=False, indent=2))
+    return summaries, checks
+
+
+def audit_duplicate_examples(herbal_dir, layers, detections, work_dir):
+    """Trace the manuscript's two example compositions to every original record."""
+    herbal_target = tuple(sorted(("목단피", "복령", "산수유", "산약", "숙지황", "택사")))
+    food_target = ("cheese", "garlic", "oil", "paprika", "pepper", "potato", "salt")
+    source_formulas = {}
+    for path in sorted(herbal_dir.glob("*.csv")):
+        handle, reader, _ = open_textbook_csv(path)
+        try:
+            fields = reader.fieldnames
+            id_col = find_column(fields, ("처방아이디", "처방ID", "처방id"))
+            herb_col = find_column(fields, ("약재한글명", "약재명"))
+            name_col = find_column(fields, ("처방한글명", "처방명"))
+            for row in reader:
+                key = (path.name, clean_text(row.get(id_col)))
+                record = source_formulas.setdefault(key, {"herbs": set(), "names": set(), "pages": set()})
+                for dest, col in (("herbs", herb_col), ("names", name_col), ("pages", "페이지")):
+                    value = clean_text(row.get(col))
+                    if value:
+                        record[dest].add(value)
+        finally:
+            handle.close()
+    herbal_sources = [
+        {"source_file": file, "formula_id": ident,
+         "formula_names": "|".join(sorted(row["names"])),
+         "pages": "|".join(sorted(row["pages"])), "herbs": "|".join(herbal_target)}
+        for (file, ident), row in sorted(source_formulas.items())
+        if tuple(sorted(row["herbs"])) == herbal_target
+    ]
+    mapping = {row["alias"]: row["canonical_ingredient"]
+               for row in read_rows(work_dir / "food/canonical_ingredient_mapping.csv")}
+    food_sources = []
+    for layer, detection in tqdm(paired_records(layers, detections), unit="recipe"):
+        raw = valid_raw_ingredients(detection)
+        composition = tuple(sorted({mapping[item] for item in raw if item in mapping}))
+        if composition == food_target and eligible(composition, valid_instructions(layer)):
+            food_sources.append({"recipe_id": layer["id"], "title": layer["title"],
+                                 "partition": layer["partition"], "ingredients": "|".join(composition),
+                                 "original_ingredients": json.dumps(layer["ingredients"], ensure_ascii=False),
+                                 "cleaned_to_standardized": json.dumps(
+                                     [{"cleaned": item, "standardized": mapping.get(item)} for item in raw],
+                                     ensure_ascii=False)})
+    summary = {}
+    for domain, target, field, sources, key in (
+        ("herbal", herbal_target, "herbs", herbal_sources, "formula_names"),
+        ("food", food_target, "ingredients", food_sources, "title"),
+    ):
+        row = next(row for row in read_rows(work_dir / domain / "unique_compositions.csv")
+                   if row[field] == "|".join(target))
+        if len(sources) != int(row["weight"]):
+            raise AssertionError(f"{domain} example source count does not match weight")
+        summary[domain] = {"composition_id": row["composition_id"], "composition": list(target),
+                           "source_records": len(sources), "weight": int(row["weight"]),
+                           "names_or_titles": dict(sorted(Counter(r[key] for r in sources).items()))}
+        write_csv(work_dir / "examples" / f"{domain}_sources.csv", tuple(sources[0]), sources)
+    (work_dir / "examples/summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return summary
+
+
 def make_figure1(herbal_counts, food_counts):
     sizes = list(range(2, 20))
     food = [food_counts[size] for size in sizes]
@@ -628,6 +753,12 @@ def main():
     for row in flow:
         print(f"{row['dataset']}: {row['source_records']:,} -> "
               f"{row['eligible_records_before_merging']:,} -> {row['unique_compositions']:,}")
+
+    heading("Duplicate examples: source-record audit")
+    audit_duplicate_examples(herbal_dir, layers, detections, ROOT / "work")
+    heading("100 matched food samples")
+    matched_food_samples(ROOT / "work/herbal/unique_compositions.csv",
+                         ROOT / "work/food/unique_compositions.csv", ROOT / "work/matching")
 
     heading("Figure 1")
     make_figure1(herbal_counts, food_counts)
