@@ -223,12 +223,14 @@ def preprocess_food(layers, detections, output_dir, ingredient_threshold=10):
 
     counts = Counter()
     total_records = 0
+    raw_size_eligible = 0
     first_pass_eligible = 0
     print("[Food pass 1/2] train split으로 standardized vocabulary 재구성")
     for layer, detection in tqdm(paired_records(layers, detections), unit="recipe"):
         total_records += 1
         raw = valid_raw_ingredients(detection)
         instructions = valid_instructions(layer)
+        raw_size_eligible += 2 <= len(raw) < 20
         if eligible(raw, instructions):
             first_pass_eligible += 1
             if layer["partition"] == "train":
@@ -261,8 +263,6 @@ def preprocess_food(layers, detections, output_dir, ingredient_threshold=10):
     ):
         raw = valid_raw_ingredients(detection)
         instructions = valid_instructions(layer)
-        if not eligible(raw, instructions):
-            continue
         raw_occurrences += len(raw)
         mapped_occurrences += sum(item in alias_to_canonical for item in raw)
         composition = tuple(sorted({
@@ -327,12 +327,15 @@ def preprocess_food(layers, detections, output_dir, ingredient_threshold=10):
         "source": "Recipe1M det_ingrs.json + layer1.json",
         "method": "Inverse Cooking build_vocab.py-compatible preprocessing",
         "source_records": total_records,
+        "raw_ingredient_count_eligible_recipes": raw_size_eligible,
+        "excluded_by_raw_ingredient_count": total_records - raw_size_eligible,
+        "excluded_by_instruction_criteria": raw_size_eligible - first_pass_eligible,
         "first_pass_eligible_recipes": first_pass_eligible,
         "included_recipes_after_canonical_mapping": included,
-        "dropped_after_canonical_mapping": dropped,
+        "excluded_by_final_eligibility": dropped,
         "canonical_ingredients": len(canonical_counts),
         "aliases": len(alias_to_canonical),
-        "raw_valid_ingredient_occurrences_in_eligible_recipes": raw_occurrences,
+        "raw_valid_ingredient_occurrences_in_source_recipes": raw_occurrences,
         "mapped_ingredient_occurrences": mapped_occurrences,
         "mapping_coverage": mapped_occurrences / raw_occurrences,
         "unique_compositions": len(composition_rows),
@@ -344,7 +347,9 @@ def preprocess_food(layers, detections, output_dir, ingredient_threshold=10):
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     print("Recipes:", f"{total_records:,}")
-    print("Recipes with 2–19 standardized ingredients:", f"{included:,}")
+    print("Recipes with 2–19 valid raw ingredients:", f"{raw_size_eligible:,}")
+    print("Recipes also meeting instruction criteria:", f"{first_pass_eligible:,}")
+    print("Eligible recipes with 2–19 standardized ingredients:", f"{included:,}")
     print("Unique compositions:", f"{len(composition_rows):,}")
     target = ("cheese", "garlic", "oil", "paprika", "pepper", "potato", "salt")
     if composition_counts[target] == 19:
@@ -415,10 +420,12 @@ def preprocess_herbal(input_dir, output_dir):
         count = sum(key[0] == path.name for key in prescriptions)
         print(f"  {path.name}: {encoding}, {count:,} formulas")
 
+    selected_prescriptions = {
+        key: herbs for key, herbs in prescriptions.items() if 2 <= len(herbs) <= 19
+    }
     grouped = defaultdict(list)
-    for key, herbs in prescriptions.items():
-        if herbs:
-            grouped[tuple(sorted(herbs))].append(key)
+    for key, herbs in selected_prescriptions.items():
+        grouped[tuple(sorted(herbs))].append(key)
 
     rows = []
     for herbs, sources in grouped.items():
@@ -431,8 +438,7 @@ def preprocess_herbal(input_dir, output_dir):
             "formula_names": "|".join(sorted({names[key] for key in sources if key in names})),
         })
     rows.sort(key=lambda row: row["composition_id"])
-    selected = [row for row in rows if 2 <= row["herb_count"] <= 19]
-    size_counts = Counter(row["herb_count"] for row in selected)
+    size_counts = Counter(row["herb_count"] for row in rows)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     write_csv(
@@ -449,8 +455,11 @@ def preprocess_herbal(input_dir, output_dir):
     metadata = {
         "source_rows": source_rows,
         "source_formulas": len(prescriptions),
+        "included_formulas_with_2_to_19_herbs": len(selected_prescriptions),
+        "excluded_by_herb_count": len(prescriptions) - len(selected_prescriptions),
         "unique_compositions": len(rows),
-        "selected_unique_compositions": len(selected),
+        "selected_unique_compositions": len(rows),
+        "duplicate_formula_compositions": len(selected_prescriptions) - len(rows),
     }
     (output_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -492,12 +501,12 @@ def make_figure1(herbal_counts, food_counts):
     ax.bar(
         [size - width / 2 for size in sizes], food_percent, width,
         color="#bdbdbd", edgecolor="#555555", linewidth=0.5,
-        label="Food before matching (n=762,996)",
+        label=f"Food before matching (n={food_total:,})",
     )
     ax.bar(
         [size + width / 2 for size in sizes], herbal_percent, width,
         color="#222222", edgecolor="#222222", linewidth=0.5,
-        label="Herbal (n=2,009)",
+        label=f"Herbal (n={herbal_total:,})",
     )
     ax.set_xlabel("Number of ingredients")
     ax.set_ylabel("Compositions (%)")
@@ -546,9 +555,9 @@ def main():
         herbal_dir, ROOT / "work/herbal"
     )
     print("Formulas:", f"{herbal_meta['source_formulas']:,}")
+    print("Formulas with 2–19 herbs:",
+          f"{herbal_meta['included_formulas_with_2_to_19_herbs']:,}")
     print("Unique compositions:", f"{herbal_meta['unique_compositions']:,}")
-    print("Compositions with 2–19 herbs:",
-          f"{herbal_meta['selected_unique_compositions']:,}")
     example = next(
         row for row in herbal_rows
         if "육미지황" in row["formula_names"] and row["weight"] == 19
@@ -577,7 +586,21 @@ def main():
         print(f"  {original['text']} -> {result['text']}")
 
     heading("Food preprocessing")
-    _, food_counts = preprocess_food(layers, detections, ROOT / "work/food")
+    food_meta, food_counts = preprocess_food(layers, detections, ROOT / "work/food")
+
+    flow = [
+        {"dataset": "food", "source_records": food_meta["source_records"],
+         "eligible_records_before_merging": food_meta["included_recipes_after_canonical_mapping"],
+         "unique_compositions": food_meta["unique_compositions"]},
+        {"dataset": "herbal", "source_records": herbal_meta["source_formulas"],
+         "eligible_records_before_merging": herbal_meta["included_formulas_with_2_to_19_herbs"],
+         "unique_compositions": herbal_meta["unique_compositions"]},
+    ]
+    write_csv(ROOT / "work/dataset_flow.csv", tuple(flow[0]), flow)
+    heading("Dataset flow: source -> eligibility -> identical-composition merging")
+    for row in flow:
+        print(f"{row['dataset']}: {row['source_records']:,} -> "
+              f"{row['eligible_records_before_merging']:,} -> {row['unique_compositions']:,}")
 
     heading("Figure 1")
     make_figure1(herbal_counts, food_counts)
