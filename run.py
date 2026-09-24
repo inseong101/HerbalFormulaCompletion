@@ -38,6 +38,7 @@ import tarfile
 import unicodedata
 from collections import Counter, defaultdict
 from contextlib import contextmanager
+from itertools import combinations
 from pathlib import Path
 
 import matplotlib as mpl
@@ -619,6 +620,109 @@ def audit_duplicate_examples(herbal_dir, layers, detections, work_dir):
     return summary
 
 
+def assign_composition_folds(rows, number=5, seed=20260812):
+    """Deterministic, length-load-balanced folds of unique compositions."""
+    ordered = sorted(rows, key=lambda row: row["composition_id"])
+    random.Random(seed).shuffle(ordered)
+    ordered.sort(key=lambda row: len(row["herbs"].split("|")), reverse=True)
+    buckets = [[] for _ in range(number)]
+    loads = [0] * number
+    for row in ordered:
+        index = min(range(number), key=lambda i: (loads[i], len(buckets[i]), i))
+        buckets[index].append(row)
+        loads[index] += len(row["herbs"].split("|"))
+    return buckets
+
+
+def training_statistics(rows, ingredient_field="herbs"):
+    """Count ingredients and unordered pairs using source multiplicity."""
+    counts, pairs = Counter(), Counter()
+    for row in rows:
+        items = sorted(set(row[ingredient_field].split("|")))
+        weight = int(row["weight"])
+        counts.update({item: weight for item in items})
+        pairs.update({pair: weight for pair in combinations(items, 2)})
+    return counts, pairs
+
+
+def recommendation_scores(context, counts, pairs):
+    """Return every training-vocabulary candidate with all three scores."""
+    context = tuple(sorted(set(context)))
+    if not context:
+        raise ValueError("At least one input ingredient is required")
+    rows = []
+    for candidate in sorted(set(counts) - set(context)):
+        conditional, jaccard = 0.0, 0.0
+        for observed in context:
+            both = pairs[tuple(sorted((observed, candidate)))]
+            conditional += both / counts[observed] if counts[observed] else 0.0
+            union = counts[observed] + counts[candidate] - both
+            jaccard += both / union if union else 0.0
+        rows.append({"candidate": candidate, "popularity": counts[candidate],
+                     "mean_conditional": conditional / len(context),
+                     "mean_jaccard": jaccard / len(context)})
+    return rows
+
+
+def recommendation_example(herbal_path, output_dir, fold_seed=20260812):
+    """Compute the manuscript example using only its held-out fold's training data."""
+    rows = read_rows(herbal_path)
+    target = set(("목단피", "복령", "산수유", "산약", "숙지황", "택사"))
+    context = ("목단피", "산수유")
+    hidden = target - set(context)
+    folds = assign_composition_folds(rows, seed=fold_seed)
+    fold_index = next(i for i, fold in enumerate(folds)
+                      if any(set(row["herbs"].split("|")) == target for row in fold))
+    test = folds[fold_index]
+    train = [row for i, fold in enumerate(folds) if i != fold_index for row in fold]
+    target_row = next(row for row in test if set(row["herbs"].split("|")) == target)
+    if any(set(row["herbs"].split("|")) == target for row in train):
+        raise AssertionError("Example composition unexpectedly included in training")
+    counts, pairs = training_statistics(train)
+    scores = recommendation_scores(context, counts, pairs)
+    top_rows = []
+    for method in ("popularity", "mean_conditional", "mean_jaccard"):
+        ranked = sorted(scores, key=lambda row: (-row[method], row["candidate"]))[:10]
+        for rank, row in enumerate(ranked, 1):
+            top_rows.append({"method": method, "rank": rank, "candidate": row["candidate"],
+                             "score": row[method], "withheld_herb": row["candidate"] in hidden})
+    support = []
+    for observed in context:
+        for candidate in sorted({row["candidate"] for row in top_rows} | hidden):
+            both = pairs[tuple(sorted((observed, candidate)))]
+            union = counts[observed] + counts[candidate] - both
+            support.append({"input": observed, "candidate": candidate,
+                            "input_weighted_count": counts[observed],
+                            "candidate_weighted_count": counts[candidate],
+                            "both_weighted_count": both, "either_weighted_count": union,
+                            "conditional": both / counts[observed] if counts[observed] else 0.0,
+                            "jaccard": both / union if union else 0.0})
+    assignments = [{"composition_id": row["composition_id"], "fold": i + 1,
+                    "example_role": "test" if i == fold_index else "train",
+                    "weight": int(row["weight"])}
+                   for i, fold in enumerate(folds) for row in fold]
+    for name, records in (("top10.csv", top_rows), ("all_candidate_scores.csv", scores),
+                          ("pair_support.csv", support), ("fold_assignments.csv", assignments)):
+        write_csv(output_dir / name, tuple(records[0]), records)
+    metadata = {"fold_seed": fold_seed, "number_of_folds": len(folds),
+                "fold_sizes": [len(fold) for fold in folds], "example_test_fold": fold_index + 1,
+                "training_unique_compositions": len(train), "test_unique_compositions": len(test),
+                "training_source_weight_sum": sum(int(row["weight"]) for row in train),
+                "example_composition_id": target_row["composition_id"],
+                "excluded_example_source_weight": int(target_row["weight"]),
+                "input": list(context), "withheld": sorted(hidden),
+                "herbal_source_sha256": hashlib.sha256(herbal_path.read_bytes()).hexdigest(),
+                "fold_policy": "Sort IDs, seeded shuffle, stable descending length sort, then assign to lowest total length; break ties by fold size and index",
+                "scores": {"popularity": "weighted occurrence count",
+                           "mean_conditional": "mean conditional proportion (0–1)",
+                           "mean_jaccard": "mean pairwise Jaccard similarity (0–1)"},
+                "ranking": "descending score, then ascending ingredient name (Unicode)",
+                "scope": "one illustrative herbal test case, not aggregate performance evaluation"}
+    (output_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps(metadata, ensure_ascii=False, indent=2))
+    return metadata, top_rows, support
+
+
 def make_figure1(herbal_counts, food_counts):
     sizes = list(range(2, 20))
     food = [food_counts[size] for size in sizes]
@@ -759,6 +863,10 @@ def main():
     heading("100 matched food samples")
     matched_food_samples(ROOT / "work/herbal/unique_compositions.csv",
                          ROOT / "work/food/unique_compositions.csv", ROOT / "work/matching")
+
+    heading("Recommendation methods: held-out herbal example")
+    recommendation_example(ROOT / "work/herbal/unique_compositions.csv",
+                           ROOT / "work/recommendation_example")
 
     heading("Figure 1")
     make_figure1(herbal_counts, food_counts)
