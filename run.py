@@ -966,7 +966,8 @@ def make_evaluation_figure(summary, output_dir):
     """Separate herbal and food plots, following the Figure 1 style."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    labels = ("Popularity", "Mean conditional probability", "Mean pairwise Jaccard")
+    plot_models = ("popularity", "mean_jaccard", "mean_conditional")
+    labels = ("Popularity", "Mean pairwise Jaccard", "Mean conditional probability")
     colors = ("#eeeeee", "#bdbdbd", "#222222")
     with mpl.rc_context({"font.family": "sans-serif",
                          "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
@@ -976,7 +977,7 @@ def make_evaluation_figure(summary, output_dir):
         for domain, title in (("herbal", "Herbal"), ("food", "Food")):
             fig, ax = plt.subplots(figsize=(7.2, 3.9))
             width = .24
-            for method_index, (model, label, color) in enumerate(zip(EVALUATION_MODELS, labels, colors)):
+            for method_index, (model, label, color) in enumerate(zip(plot_models, labels, colors)):
                 rows = [next(r for r in summary if r["condition"] == c and r["method"] == model)
                         for c in EVALUATION_CONDITIONS]
                 key = "herbal_performance" if domain == "herbal" else "food_mean"
