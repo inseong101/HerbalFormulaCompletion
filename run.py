@@ -958,56 +958,53 @@ def evaluate_all(work_dir, workers=2):
                     sample_result_rows=len(sample_rows), reference_ranking_checks=sum(r["reference_ranking_checks"] for r in audits))
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     make_evaluation_figure(summary, ROOT / "figures")
-    print("Complete: work/evaluation/summary.csv and figures/Figure2_recommendation_performance.png", flush=True)
+    print("Complete: work/evaluation/summary.csv and figures/Figure2_{herbal,food}_performance.png", flush=True)
     return summary
 
 
 def make_evaluation_figure(summary, output_dir):
-    """Plot all methods and conditions; food intervals describe sample variation."""
+    """Separate herbal and food plots, following the Figure 1 style."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     labels = ("Popularity", "Mean conditional probability", "Mean pairwise Jaccard")
-    with mpl.rc_context({"font.family": "DejaVu Sans", "font.size": 10,
+    colors = ("#eeeeee", "#bdbdbd", "#222222")
+    with mpl.rc_context({"font.family": "sans-serif",
+                         "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+                         "font.size": 9, "axes.linewidth": 0.8,
                          "axes.spines.top": False, "axes.spines.right": False,
-                         "svg.fonttype": "none", "svg.hashsalt": "hfc-evaluation"}):
-        fig, axes = plt.subplots(1, 3, figsize=(12, 4.6), sharey=True)
-        for panel, (ax, model, title) in enumerate(zip(axes, EVALUATION_MODELS, labels)):
-            rows = [next(r for r in summary if r["condition"] == c and r["method"] == model)
-                    for c in EVALUATION_CONDITIONS]
-            herbal = [100 * float(r["herbal_performance"]) for r in rows]
-            food = [100 * float(r["food_mean"]) for r in rows]
-            lower = [100 * float(r["food_p2_5"]) for r in rows]
-            upper = [100 * float(r["food_p97_5"]) for r in rows]
-            ax.scatter([i - .12 for i in range(5)], herbal, color="#222222", marker="o",
-                       s=45, label="Herbal", zorder=3)
-            ax.errorbar([i + .12 for i in range(5)], food,
-                        yerr=[[m-l for m,l in zip(food,lower)], [u-m for u,m in zip(upper,food)]],
-                        fmt="s", color="#888888", markersize=5.5, capsize=4,
-                        linewidth=1.5, label="Food (100-sample mean)", zorder=3)
-            ax.set_title(f"{chr(65+panel)}  {title}", loc="left", fontsize=11, pad=12)
+                         "svg.fonttype": "none", "svg.hashsalt": "HerbalFormulaCompletion"}):
+        for domain, title in (("herbal", "Herbal"), ("food", "Food")):
+            fig, ax = plt.subplots(figsize=(7.2, 3.9))
+            width = .24
+            for method_index, (model, label, color) in enumerate(zip(EVALUATION_MODELS, labels, colors)):
+                rows = [next(r for r in summary if r["condition"] == c and r["method"] == model)
+                        for c in EVALUATION_CONDITIONS]
+                key = "herbal_performance" if domain == "herbal" else "food_mean"
+                values = [100 * float(r[key]) for r in rows]
+                errors = None
+                if domain == "food":
+                    errors = [[v - 100 * float(r["food_p2_5"]) for v, r in zip(values, rows)],
+                              [100 * float(r["food_p97_5"]) - v for v, r in zip(values, rows)]]
+                ax.bar([i + (method_index - 1) * width for i in range(5)], values, width,
+                       color=color, edgecolor="#555555", linewidth=.5, label=label,
+                       yerr=errors, error_kw={"elinewidth": .7, "capsize": 2, "capthick": .7,
+                                             "ecolor": "#555555"})
+            ax.set_title(title, fontsize=10)
             ax.set_xticks(range(5), ["2", "3", "50%", "75%", "N−1"])
-            ax.set_xlabel("Input ingredients retained", labelpad=9)
-            ax.set_ylim(0, 60)
+            ax.set_xlabel("Input ingredients retained")
+            ax.set_ylabel("Recall@10 / Hit@10 (%)")
+            ax.set_ylim(0, 65)
             ax.set_yticks(range(0, 61, 10))
-            ax.set_xlim(-.5, 4.5)
-            ax.grid(axis="y", color="#e5e5e5", linewidth=.7)
-            ax.set_axisbelow(True)
-        axes[0].set_ylabel("Recall@10 / Hit@10 (%)")
-        handles, legend_labels = axes[0].get_legend_handles_labels()
-        fig.legend(handles, legend_labels, loc="lower center", bbox_to_anchor=(.5, .065),
-                   frameon=False, ncol=2)
-        fig.text(.5, .025, "Food error bars: empirical 2.5–97.5 percentiles across 100 samples (not confidence intervals).",
-                 ha="center", fontsize=9, color="#444444")
-        fig.subplots_adjust(left=.065, right=.985, top=.88, bottom=.27, wspace=.12)
-        for ext in ("png", "svg", "pdf"):
-            metadata = {"Date": None} if ext == "svg" else ({"CreationDate": None, "ModDate": None} if ext == "pdf" else None)
-            fig.savefig(output_dir / f"Figure2_recommendation_performance.{ext}", dpi=300,
-                        facecolor="white", metadata=metadata)
-        plt.close(fig)
+            ax.legend(frameon=False, loc="upper left", fontsize=8)
+            for ext in ("png", "svg", "pdf"):
+                metadata = {"Date": None} if ext == "svg" else ({"CreationDate": None, "ModDate": None} if ext == "pdf" else None)
+                fig.savefig(output_dir / f"Figure2_{domain}_performance.{ext}", dpi=600,
+                            bbox_inches="tight", facecolor="white", metadata=metadata)
+            plt.close(fig)
     caption = ("Fig. 2. Ingredient recommendation performance in herbal formulas and matched food samples. "
-               "Panels A–C show Popularity, Mean conditional probability, and Mean pairwise Jaccard, respectively. "
-               "Black circles indicate herbal performance; gray squares indicate mean performance across 100 matched food samples. "
-               "Error bars show the empirical 2.5th–97.5th percentiles of food-sample performance, not confidence intervals. "
+               "Separate plots show herbal performance and mean performance across 100 matched food samples. "
+               "Bars represent Popularity, Mean conditional probability, and Mean pairwise Jaccard. "
+               "Food error bars show the empirical 2.5th–97.5th percentiles across samples, not confidence intervals. "
                "Input conditions retain 2 or 3 ingredients, 50% or 75% of ingredients, or all but one ingredient (N−1). "
                "Performance is Recall@10, equivalent to Hit@10 for N−1. Scores are averaged within each composition and then equally across eligible compositions. "
                "Each cohort includes 1,899 eligible compositions for the 2-ingredient condition, 1,753 for the 3-ingredient condition, and 2,009 for each remaining condition.")
