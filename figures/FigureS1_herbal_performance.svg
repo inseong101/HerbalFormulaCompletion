@@ -79,80 +79,80 @@ z
    <g id="patch_8">
     <path d="M 73.498627 236.696273
 L 92.069968 236.696273
-L 92.069968 115.718134
-L 73.498627 115.718134
+L 92.069968 100.299366
+L 73.498627 100.299366
 z
 " clip-path="url(#p7ba1079631)" style="fill: #bdbdbd; stroke: #555555; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="patch_9">
     <path d="M 150.879213 236.696273
 L 169.450553 236.696273
-L 169.450553 99.057502
-L 150.879213 99.057502
+L 169.450553 89.782944
+L 150.879213 89.782944
 z
 " clip-path="url(#p7ba1079631)" style="fill: #bdbdbd; stroke: #555555; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="patch_10">
     <path d="M 228.259798 236.696273
 L 246.831139 236.696273
-L 246.831139 87.230131
-L 228.259798 87.230131
+L 246.831139 84.05217
+L 228.259798 84.05217
 z
 " clip-path="url(#p7ba1079631)" style="fill: #bdbdbd; stroke: #555555; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="patch_11">
     <path d="M 305.640384 236.696273
 L 324.211725 236.696273
-L 324.211725 69.440223
-L 305.640384 69.440223
+L 324.211725 71.592697
+L 305.640384 71.592697
 z
 " clip-path="url(#p7ba1079631)" style="fill: #bdbdbd; stroke: #555555; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="patch_12">
     <path d="M 383.02097 236.696273
 L 401.59231 236.696273
-L 401.59231 64.270068
-L 383.02097 64.270068
+L 401.59231 67.105667
+L 383.02097 67.105667
 z
 " clip-path="url(#p7ba1079631)" style="fill: #bdbdbd; stroke: #555555; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="patch_13">
     <path d="M 92.069968 236.696273
 L 110.641309 236.696273
-L 110.641309 100.299366
-L 92.069968 100.299366
+L 110.641309 115.718134
+L 92.069968 115.718134
 z
 " clip-path="url(#p7ba1079631)" style="fill: #222222; stroke: #555555; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="patch_14">
     <path d="M 169.450553 236.696273
 L 188.021894 236.696273
-L 188.021894 89.782944
-L 169.450553 89.782944
+L 188.021894 99.057502
+L 169.450553 99.057502
 z
 " clip-path="url(#p7ba1079631)" style="fill: #222222; stroke: #555555; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="patch_15">
     <path d="M 246.831139 236.696273
 L 265.40248 236.696273
-L 265.40248 84.05217
-L 246.831139 84.05217
+L 265.40248 87.230131
+L 246.831139 87.230131
 z
 " clip-path="url(#p7ba1079631)" style="fill: #222222; stroke: #555555; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="patch_16">
     <path d="M 324.211725 236.696273
 L 342.783065 236.696273
-L 342.783065 71.592697
-L 324.211725 71.592697
+L 342.783065 69.440223
+L 324.211725 69.440223
 z
 " clip-path="url(#p7ba1079631)" style="fill: #222222; stroke: #555555; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
    <g id="patch_17">
     <path d="M 401.59231 236.696273
 L 420.163651 236.696273
-L 420.163651 67.105667
-L 401.59231 67.105667
+L 420.163651 64.270068
+L 401.59231 64.270068
 z
 " clip-path="url(#p7ba1079631)" style="fill: #222222; stroke: #555555; stroke-width: 0.5; stroke-linejoin: miter"/>
    </g>
@@ -330,18 +330,18 @@ z
 " style="fill: #bdbdbd; stroke: #555555; stroke-width: 0.5; stroke-linejoin: miter"/>
     </g>
     <g id="text_17">
-     <text style="font-size: 8px; font-family: 'Arial', 'Helvetica', 'DejaVu Sans', sans-serif; text-anchor: start" x="66.265469" y="45.012461" transform="rotate(-0 66.265469 45.012461)">Mean pairwise Jaccard</text>
+     <text style="font-size: 8px; font-family: 'Arial', 'Helvetica', 'DejaVu Sans', sans-serif; text-anchor: start" x="66.265469" y="45.012461" transform="rotate(-0 66.265469 45.012461)">Mean conditional probability</text>
     </g>
     <g id="patch_22">
-     <path d="M 43.865469 56.520273
-L 59.865469 56.520273
-L 59.865469 50.920273
-L 43.865469 50.920273
+     <path d="M 43.865469 56.52043
+L 59.865469 56.52043
+L 59.865469 50.92043
+L 43.865469 50.92043
 z
 " style="fill: #222222; stroke: #555555; stroke-width: 0.5; stroke-linejoin: miter"/>
     </g>
     <g id="text_18">
-     <text style="font-size: 8px; font-family: 'Arial', 'Helvetica', 'DejaVu Sans', sans-serif; text-anchor: start" x="66.265469" y="56.520273" transform="rotate(-0 66.265469 56.520273)">Mean conditional probability</text>
+     <text style="font-size: 8px; font-family: 'Arial', 'Helvetica', 'DejaVu Sans', sans-serif; text-anchor: start" x="66.265469" y="56.52043" transform="rotate(-0 66.265469 56.52043)">Mean pairwise Jaccard</text>
     </g>
    </g>
   </g>

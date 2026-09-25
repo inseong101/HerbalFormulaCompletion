@@ -966,7 +966,7 @@ def make_evaluation_figure(summary, output_dir):
     """Primary leave-one-out evaluation: every ingredient is withheld once."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    models = ("popularity", "mean_jaccard", "mean_conditional")
+    models = ("popularity", "mean_conditional", "mean_jaccard")
     rows = [next(r for r in summary if r["condition"] == "N-1" and r["method"] == m) for m in models]
     herbal = [100 * float(r["herbal_performance"]) for r in rows]
     food = [100 * float(r["food_mean"]) for r in rows]
@@ -980,7 +980,7 @@ def make_evaluation_figure(summary, output_dir):
         ax.bar([i-width/2 for i in range(3)], herbal, width, color="#222222", edgecolor="#222222", linewidth=.5, label="Herbal")
         ax.bar([i+width/2 for i in range(3)], food, width, color="#bdbdbd", edgecolor="#555555", linewidth=.5,
                label="Food", yerr=errors, error_kw={"elinewidth": .7, "capsize": 3, "capthick": .7, "ecolor": "#555555"})
-        ax.set_xticks(range(3), ["Popularity", "Mean pairwise Jaccard", "Mean conditional probability"])
+        ax.set_xticks(range(3), ["Popularity", "Mean conditional probability", "Mean pairwise Jaccard"])
         ax.set_ylabel("Hit@10 (%)")
         ax.set_ylim(0, 65)
         ax.set_yticks(range(0, 61, 10))
@@ -1003,8 +1003,8 @@ def make_supplementary_evaluation_figures(summary, output_dir):
     """Separate herbal and food plots, following the Figure 1 style."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    plot_models = ("popularity", "mean_jaccard", "mean_conditional")
-    labels = ("Popularity", "Mean pairwise Jaccard", "Mean conditional probability")
+    plot_models = ("popularity", "mean_conditional", "mean_jaccard")
+    labels = ("Popularity", "Mean conditional probability", "Mean pairwise Jaccard")
     colors = ("#eeeeee", "#bdbdbd", "#222222")
     with mpl.rc_context({"font.family": "sans-serif",
                          "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
