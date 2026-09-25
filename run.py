@@ -741,7 +741,7 @@ def evaluation_contexts(row, condition, ingredient_field, seed=20260823, maximum
         size = int(condition)
     if not 1 <= size < n:
         return []
-    if math.comb(n, size) <= maximum:
+    if condition == "N-1" or math.comb(n, size) <= maximum:
         return list(combinations(items, size))
     digest = hashlib.sha256((row["composition_id"] + condition).encode()).hexdigest()[:16]
     rng = random.Random(int(digest, 16) + seed)
@@ -899,7 +899,7 @@ def evaluate_all(work_dir, workers=2):
             hashes[name] = hashlib.file_digest(handle, "sha256").hexdigest()
     metadata = {"status": "running", "models": list(EVALUATION_MODELS),
                 "conditions": list(EVALUATION_CONDITIONS), "folds": 5, "fold_seed": 20260812,
-                "context_seed": 20260823, "maximum_contexts_per_composition_condition": 5,
+                "context_seed": 20260823, "maximum_contexts_per_composition_condition": {"N-1": "all N leave-one-out cases", "other_conditions": 5},
                 "input_hashes": hashes,
                 "training_weight": "source-record multiplicity",
                 "evaluation_weight": "mean within each composition, then equal weight to each eligible composition across all test folds",
@@ -958,11 +958,48 @@ def evaluate_all(work_dir, workers=2):
                     sample_result_rows=len(sample_rows), reference_ranking_checks=sum(r["reference_ranking_checks"] for r in audits))
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     make_evaluation_figure(summary, ROOT / "figures")
-    print("Complete: work/evaluation/summary.csv and figures/Figure2_{herbal,food}_performance.png", flush=True)
+    print("Complete: work/evaluation/summary.csv and figures/Figure2_recommendation_performance.png", flush=True)
     return summary
 
 
 def make_evaluation_figure(summary, output_dir):
+    """Primary leave-one-out evaluation: every ingredient is withheld once."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    models = ("popularity", "mean_jaccard", "mean_conditional")
+    rows = [next(r for r in summary if r["condition"] == "N-1" and r["method"] == m) for m in models]
+    herbal = [100 * float(r["herbal_performance"]) for r in rows]
+    food = [100 * float(r["food_mean"]) for r in rows]
+    errors = [[v - 100 * float(r["food_p2_5"]) for v,r in zip(food,rows)],
+              [100 * float(r["food_p97_5"]) - v for v,r in zip(food,rows)]]
+    with mpl.rc_context({"font.family": "sans-serif", "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+                         "font.size": 9, "axes.linewidth": .8, "axes.spines.top": False,
+                         "axes.spines.right": False, "svg.fonttype": "none", "svg.hashsalt": "HerbalFormulaCompletion"}):
+        fig, ax = plt.subplots(figsize=(7.2, 3.9))
+        width = .32
+        ax.bar([i-width/2 for i in range(3)], herbal, width, color="#222222", edgecolor="#222222", linewidth=.5, label="Herbal")
+        ax.bar([i+width/2 for i in range(3)], food, width, color="#bdbdbd", edgecolor="#555555", linewidth=.5,
+               label="Food", yerr=errors, error_kw={"elinewidth": .7, "capsize": 3, "capthick": .7, "ecolor": "#555555"})
+        ax.set_xticks(range(3), ["Popularity", "Mean pairwise Jaccard", "Mean conditional probability"])
+        ax.set_ylabel("Hit@10 (%)")
+        ax.set_ylim(0, 65)
+        ax.set_yticks(range(0, 61, 10))
+        ax.legend(frameon=False, loc="upper left")
+        for ext in ("png", "svg", "pdf"):
+            metadata = {"Date": None} if ext == "svg" else ({"CreationDate": None, "ModDate": None} if ext == "pdf" else None)
+            fig.savefig(output_dir / f"Figure2_recommendation_performance.{ext}", dpi=600, bbox_inches="tight", facecolor="white", metadata=metadata)
+        plt.close(fig)
+    caption = ("Fig. 2. Recovery of a single withheld ingredient. Each ingredient in every composition was withheld once, "
+               "with all remaining ingredients provided as input. Hit@10 was averaged first within each composition and then equally across all 2,009 compositions. "
+               "Black bars show herbal performance; gray bars show mean performance across 100 matched food samples. "
+               "Food error bars represent empirical 2.5th–97.5th percentiles across samples, not confidence intervals.")
+    (output_dir / "Figure2_caption.txt").write_text(caption + "\n", encoding="utf-8")
+    make_supplementary_evaluation_figures(summary, output_dir)
+    for path in output_dir.glob("Figure*.svg"):
+        path.write_text("\n".join(line.rstrip() for line in path.read_text().splitlines()) + "\n")
+
+
+def make_supplementary_evaluation_figures(summary, output_dir):
     """Separate herbal and food plots, following the Figure 1 style."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -999,7 +1036,7 @@ def make_evaluation_figure(summary, output_dir):
             ax.legend(frameon=False, loc="upper left", fontsize=8)
             for ext in ("png", "svg", "pdf"):
                 metadata = {"Date": None} if ext == "svg" else ({"CreationDate": None, "ModDate": None} if ext == "pdf" else None)
-                fig.savefig(output_dir / f"Figure2_{domain}_performance.{ext}", dpi=600,
+                fig.savefig(output_dir / f"FigureS1_{domain}_performance.{ext}", dpi=600,
                             bbox_inches="tight", facecolor="white", metadata=metadata)
             plt.close(fig)
     caption = ("Fig. 2. Ingredient recommendation performance in herbal formulas and matched food samples. "
@@ -1009,7 +1046,7 @@ def make_evaluation_figure(summary, output_dir):
                "Input conditions retain 2 or 3 ingredients, 50% or 75% of ingredients, or all but one ingredient (N−1). "
                "Performance is Recall@10, equivalent to Hit@10 for N−1. Scores are averaged within each composition and then equally across eligible compositions. "
                "Each cohort includes 1,899 eligible compositions for the 2-ingredient condition, 1,753 for the 3-ingredient condition, and 2,009 for each remaining condition.")
-    (output_dir / "Figure2_caption.txt").write_text(caption + "\n", encoding="utf-8")
+    (output_dir / "FigureS1_caption.txt").write_text(caption.replace("Fig. 2.", "Fig. S1.") + "\n", encoding="utf-8")
 
 
 def make_figure1(herbal_counts, food_counts):
