@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Reproduce preprocessing, Figure 1, examples, matching, and recommendation evaluation.
+"""Reproduce preprocessing, recommendation evaluation, and fixed-margin structure analysis.
 
-Local setup: python -m pip install "matplotlib>=3.9,<4" "tqdm>=4.66,<5"
+Local setup: python -m pip install "matplotlib>=3.9,<4" "tqdm>=4.66,<5" "numba>=0.61,<0.68" "networkx>=3.4,<4"
 Run: python run.py
 Generated tables and counts are written to work/.
 """
@@ -1110,11 +1110,517 @@ def make_figure1(herbal_counts, food_counts):
     print("Saved:", png.relative_to(ROOT))
 
 
+import numpy as np
+from numba import njit
+
+@njit(cache=True)
+def curveball_trade(matrix, lengths):
+    n = len(lengths)
+    a = np.random.randint(n)
+    b = np.random.randint(n - 1)
+    if b >= a: b += 1
+    la, lb = lengths[a], lengths[b]
+    shared = np.empty(19, np.int64)
+    pool = np.empty(38, np.int64)
+    nc, na, total = 0, 0, 0
+    for i in range(la):
+        x = matrix[a, i]
+        found = False
+        for j in range(lb):
+            if matrix[b, j] == x: found = True; break
+        if found:
+            shared[nc] = x; nc += 1
+        else:
+            pool[total] = x; total += 1; na += 1
+    for j in range(lb):
+        x = matrix[b, j]
+        found = False
+        for i in range(la):
+            if matrix[a, i] == x: found = True; break
+        if not found: pool[total] = x; total += 1
+    if na == 0 or total == na: return
+    for k in range(total - 1, 0, -1):
+        j = np.random.randint(k + 1)
+        pool[k], pool[j] = pool[j], pool[k]
+    for j in range(nc):
+        matrix[a,j] = shared[j]; matrix[b,j] = shared[j]
+    for j in range(na): matrix[a,nc+j] = pool[j]
+    for j in range(na,total): matrix[b,nc+j-na] = pool[j]
+
+@njit(cache=True)
+def pair_vector(matrix, lengths, lookup, pair_a, pair_b, k):
+    counts = np.zeros((k,k), np.int32)
+    for r in range(len(lengths)):
+        for u in range(lengths[r]):
+            a = lookup[matrix[r,u]]
+            if a < 0: continue
+            for v in range(u+1,lengths[r]):
+                b = lookup[matrix[r,v]]
+                if b < 0: continue
+                if a < b: counts[a,b] += 1
+                else: counts[b,a] += 1
+    result = np.empty(len(pair_a),np.int32)
+    for p in range(len(pair_a)): result[p] = counts[pair_a[p],pair_b[p]]
+    return result
+
+@njit(cache=True)
+def curveball_chain(original, lengths, lookup, pair_a, pair_b, k, draws, seed, burn, spacing):
+    np.random.seed(seed)
+    matrix = original.copy()
+    values = np.empty((draws,len(pair_a)),np.int16)
+    overlap = np.empty(draws,np.float64)
+    for _ in range(burn): curveball_trade(matrix,lengths)
+    expected_columns = np.zeros(len(lookup),np.int64)
+    for r in range(len(lengths)):
+        for u in range(lengths[r]): expected_columns[original[r,u]] += 1
+    for draw in range(draws):
+        for _ in range(spacing): curveball_trade(matrix,lengths)
+        columns = np.zeros(len(lookup),np.int64)
+        common = 0
+        for r in range(len(lengths)):
+            for u in range(lengths[r]):
+                a = matrix[r,u]
+                columns[a] += 1
+                for v in range(u):
+                    if matrix[r,v] == a: raise ValueError('Duplicate ingredient after trade')
+                for v in range(lengths[r]):
+                    if original[r,v] == a: common += 1; break
+        if not np.array_equal(columns,expected_columns): raise ValueError('Column margins changed')
+        overlap[draw] = common / lengths.sum()
+        values[draw] = pair_vector(matrix,lengths,lookup,pair_a,pair_b,k)
+    return values,overlap,matrix
+
+
+# Section 2.5: fixed-margin randomization, after Strona et al. (2014),
+# doi:10.1038/ncomms5114. Binary unique compositions, NOT source-weighted margins.
+# Its finite Curveball chains are checked empirically; exact independent sampling
+# is not claimed. Ahn et al. (2011), doi:10.1038/srep00196, motivates a
+# frequency-controlled food comparison, not this exact co-occurrence protocol.
+
+STRUCTURE_SEED = 20260928
+STRUCTURE_MIN_OCCURRENCES = 10
+
+
+def structure_bh(pvalues):
+    pvalues = np.asarray(pvalues, dtype=float)
+    order = np.argsort(pvalues, kind="stable")
+    q = np.empty(len(pvalues))
+    q[order] = np.minimum(1, np.minimum.accumulate(
+        (pvalues[order] * len(pvalues) / np.arange(1, len(pvalues) + 1))[::-1])[::-1])
+    return q
+
+
+def structure_prepare(rows, field, weighted=False):
+    vocabulary = sorted({x for r in rows for x in r[field].split("|")})
+    index = {x:i for i,x in enumerate(vocabulary)}
+    expanded = [r for r in rows for _ in range(int(r["weight"]) if weighted else 1)]
+    matrix = np.full((len(expanded), 19), -1, dtype=np.int64)
+    lengths = np.array([len(r[field].split("|")) for r in expanded],dtype=np.int64)
+    for i,r in enumerate(expanded):
+        matrix[i,:lengths[i]] = sorted(index[x] for x in r[field].split("|"))
+    frequency = np.bincount(matrix[matrix >= 0], minlength=len(vocabulary))
+    retained = np.flatnonzero(frequency >= STRUCTURE_MIN_OCCURRENCES)
+    lookup = np.full(len(vocabulary), -1, dtype=np.int64)
+    lookup[retained] = np.arange(len(retained))
+    pair_a,pair_b = np.triu_indices(len(retained), 1)
+    return vocabulary,matrix,lengths,frequency,retained,lookup,pair_a,pair_b
+
+
+def structure_diagnostics(chains, overlaps):
+    def diagnose(traces):
+        m = min(len(t) for t in traces)
+        x = np.array([t[:m] for t in traces],dtype=float)
+        within = float(np.mean(np.var(x,axis=1,ddof=1)))
+        between = float(m*np.var(x.mean(axis=1),ddof=1))
+        rhat = math.sqrt(((m-1)/m*within+between/m)/within) if within else 1.0
+        correlations = [float(np.corrcoef(t[:-1],t[1:])[0,1]) if np.std(t)>0 else 0.0 for t in traces]
+        return {"rhat":rhat,"lag1":correlations}
+    concentration = [(np.einsum("ij,ij->i",c,c,dtype=np.int64)-c.sum(axis=1))/2 for c in chains]
+    return {"incidence_overlap":diagnose(overlaps),"repeated_pair_count":diagnose(concentration)}, concentration
+
+
+def structure_algorithm_hash():
+    import inspect
+    import numba
+    functions = (curveball_trade.py_func, pair_vector.py_func, curveball_chain.py_func,
+                 structure_prepare, structure_bh, structure_diagnostics, structure_cohort)
+    material = "\n".join(inspect.getsource(fn) for fn in functions)
+    material += f"\n{STRUCTURE_MIN_OCCURRENCES}|{np.__version__}|{numba.__version__}"
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def structure_cohort(task):
+    domain,replicate,rows,field,out,draws,weighted,spacing_override = task
+    out=Path(out);out.mkdir(parents=True,exist_ok=True)
+    vocabulary,matrix,lengths,frequency,retained,lookup,pa,pb = structure_prepare(rows,field,weighted)
+    if len(matrix)>=32767: raise ValueError("Null count storage requires fewer than 32767 rows")
+    if len(pa)==0: raise ValueError("No eligible ingredient pairs")
+    seed = STRUCTURE_SEED + replicate*100 + (50000 if weighted else 0)
+    algorithm_hash = structure_algorithm_hash()
+    previous=out/'metadata.json'
+    if previous.exists():
+        saved=json.loads(previous.read_text())
+        summary=saved.get('summary',{})
+        if (saved.get('status')=='complete' and saved.get('algorithm_sha256')==algorithm_hash
+            and saved.get('seed')==seed
+            and saved.get('chains')==2 and summary.get('null_draws')==draws
+            and summary.get('basis')==('source_records' if weighted else 'unique_compositions')
+            and summary.get('tested_pairs')==len(pa)
+            and summary.get('trade_spacing_per_row',0)>=(spacing_override or 5)):
+            with np.load(out/'margin_check_states.npz') as state:
+                reusable=np.array_equal(state['original'],matrix) and np.array_equal(state['vocabulary'],np.array(vocabulary))
+            if reusable and all((out/name).exists() for name in ('pair_results.csv.gz','top_pairs.csv','mixing_trace.csv','illustrative_nulls.npz')): return summary
+    previous.write_text(json.dumps({'status':'running'})+'\n')
+    original = pair_vector(matrix,lengths,lookup,pa,pb,len(retained))
+    seed = STRUCTURE_SEED + replicate*100 + (50000 if weighted else 0)
+    spacing = spacing_override or 5
+    for attempt in range(3):
+        chains=[];overlaps=[];final_states=[]
+        for chain,n in enumerate((draws//2,draws-draws//2)):
+            values,overlap,last = curveball_chain(matrix,lengths,lookup,pa,pb,len(retained),n,
+                seed+chain,20*spacing//5*len(rows if not weighted else matrix),spacing*len(matrix))
+            chains.append(values);overlaps.append(overlap);final_states.append(last)
+        diagnostic,traces=structure_diagnostics(chains,overlaps)
+        passed=all(d["rhat"]<1.05 and max(abs(x) for x in d["lag1"])<.2 for d in diagnostic.values())
+        if passed: break
+        spacing *= 2
+    if not passed: raise RuntimeError(f"Mixing checks failed for {domain} {replicate}: {diagnostic}")
+    null=np.concatenate(chains)
+    mean=null.mean(axis=0)
+    second=np.einsum("ij,ij->j",null,null,dtype=np.float64)
+    sd=np.sqrt(np.maximum(0,(second-len(null)*mean*mean)/(len(null)-1)))
+    p=(1+np.sum(null>=original,axis=0))/(len(null)+1)
+    q=structure_bh(p)
+    excess=original-mean
+    ratio=np.divide(original,mean,out=np.full_like(mean,np.nan),where=mean>0)
+    z=np.divide(excess,sd,out=np.zeros_like(mean),where=sd>0)
+    records=[]
+    for j,(a,b) in enumerate(zip(pa,pb)):
+        ia,ib=retained[a],retained[b]
+        records.append({"ingredient_a":vocabulary[ia],"ingredient_b":vocabulary[ib],
+            "occurrence_a":int(frequency[ia]),"occurrence_b":int(frequency[ib]),
+            "observed":int(original[j]),"null_mean":float(mean[j]),"null_sd":float(sd[j]),
+            "excess":float(excess[j]),"observed_expected_ratio":float(ratio[j]) if mean[j]>0 else "",
+            "standardized_excess":float(z[j]),"p_upper":float(p[j]),"q_bh":float(q[j]),
+            "enriched_q05":bool(q[j]<=.05 and excess[j]>0),
+            "network_edge":bool(q[j]<=.05 and excess[j]>0 and original[j]>=10)})
+    with gzip.open(out/'pair_results.csv.gz','wt',encoding='utf-8',newline='') as handle:
+        writer=csv.DictWriter(handle,fieldnames=tuple(records[0]));writer.writeheader();writer.writerows(records)
+    ranked=sorted(range(len(records)),key=lambda i:(-excess[i],records[i]['ingredient_a'],records[i]['ingredient_b']))
+    write_csv(out/'top_pairs.csv',tuple(records[0]),[records[i] for i in ranked[:100]])
+    chosen=ranked[:4]
+    if domain=='herbal':
+        for wanted in ({'황금','황련'},{'목단피','산수유'}):
+            chosen += [i for i,r in enumerate(records) if {r['ingredient_a'],r['ingredient_b']}==wanted]
+    chosen=list(dict.fromkeys(chosen))
+    np.savez_compressed(out/'illustrative_nulls.npz',counts=null[:,chosen],
+        labels=np.array([records[i]['ingredient_a']+' / '+records[i]['ingredient_b'] for i in chosen]),
+        observed=original[chosen])
+    write_csv(out/'mixing_trace.csv',('chain','draw','incidence_overlap','repeated_pair_count'),
+        ({'chain':c+1,'draw':j+1,'incidence_overlap':float(overlaps[c][j]),'repeated_pair_count':float(traces[c][j])}
+         for c in range(2) for j in range(len(overlaps[c]))))
+    np.savez_compressed(out/'margin_check_states.npz',original=matrix,lengths=lengths,
+        chain1=final_states[0],chain2=final_states[1],vocabulary=np.array(vocabulary))
+    global_null=np.concatenate(traces)
+    global_original=int(np.sum(original.astype(np.int64)*(original-1)//2))
+    null_lag=diagnostic['repeated_pair_count']['lag1']
+    summary={'domain':domain,'replicate':replicate,'basis':'source_records' if weighted else 'unique_compositions',
+        'compositions':len(matrix),'vocabulary':len(vocabulary),'eligible_ingredients':len(retained),
+        'tested_pairs':len(pa),'enriched_pairs_q05':sum(r['enriched_q05'] for r in records),
+        'network_edges_q05_support10':sum(r['network_edge'] for r in records),
+        'repeated_pair_observed':global_original,'repeated_pair_null_mean':float(global_null.mean()),
+        'repeated_pair_observed_expected':float(global_original/global_null.mean()),
+        'repeated_pair_p_upper':float((1+np.sum(global_null>=global_original))/(draws+1)),
+        'null_draws':draws,'trade_spacing_per_row':spacing,
+        'mixing_rhat':diagnostic['repeated_pair_count']['rhat'],
+        'maximum_absolute_lag1':max(abs(x) for d in diagnostic.values() for x in d['lag1'])}
+    metadata={'status':'complete','algorithm_sha256':algorithm_hash,'summary':summary,'seed':seed,'chains':2,'diagnostics':diagnostic,
+        'burn_in_trades_per_chain':20*spacing//5*len(matrix),'between_draw_trades':spacing*len(matrix),
+        'row_and_column_margins_checked_each_draw':True,'duplicate_ingredients_checked_each_draw':True,
+        'null_duplicate_rows':'allowed; do not re-merge randomized compositions',
+        'multiplicity_family':'all unordered pairs of ingredients occurring in at least 10 rows, including observed-zero pairs',
+        'p_values':'one-sided enrichment, (1 + null counts >= observed)/(B + 1); finite-chain Monte Carlo estimates',
+        'adjustment':'Benjamini-Hochberg separately per cohort, q<=0.05; exploratory associations, not clinical rules',
+        'network_display':'q<=0.05 and observed>=10; top edges by observed-minus-null mean; selection is descriptive'}
+    (out/'metadata.json').write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n')
+    return summary
+
+
+def structure_frequency_tables(work_dir,out):
+    full=[];cohorts={};concentration=[]
+    memberships=read_rows(work_dir/'matching/membership.csv')
+    wanted={r['composition_id'] for r in memberships}
+    food_selected={}
+    herbs=read_rows(work_dir/'herbal/unique_compositions.csv')
+    for domain,field,path in [('herbal','herbs',work_dir/'herbal/unique_compositions.csv'),
+                               ('food','ingredients',work_dir/'food/unique_compositions.csv')]:
+        weighted=Counter();unique=Counter();n=0;weight_sum=0
+        with path.open(encoding='utf-8-sig',newline='') as h:
+            for row in csv.DictReader(h):
+                xs=row[field].split('|');w=int(row['weight']);n+=1;weight_sum+=w
+                unique.update(xs);weighted.update({x:w for x in xs})
+                if domain=='food' and row['composition_id'] in wanted: food_selected[row['composition_id']]=row
+        for basis,counts,denominator in [('source_records',weighted,weight_sum),('unique_compositions',unique,n)]:
+            ordered=sorted(counts,key=lambda x:(-counts[x],x))
+            for rank,name in enumerate(ordered,1):
+                full.append({'domain':domain,'basis':basis,'rank':rank,'ingredient':name,'count':counts[name],
+                             'records':denominator,'prevalence':counts[name]/denominator})
+            concentration.append({'domain':domain,'basis':basis,'records':denominator,'vocabulary':len(counts),
+                'top10_incidence_share':sum(counts[x] for x in ordered[:10])/sum(counts.values()),
+                'top_ingredient':ordered[0],'top_ingredient_prevalence':counts[ordered[0]]/denominator})
+    write_csv(out/'ingredient_frequencies.csv',tuple(full[0]),full)
+    write_csv(out/'frequency_summary.csv',tuple(concentration[0]),concentration)
+    for m in memberships:
+        row=food_selected[m['composition_id']]
+        assert int(row['weight'])==int(m['weight']) and int(row['ingredient_count'])==int(m['ingredient_count'])
+        cohorts.setdefault(int(m['replicate']),[]).append(row)
+    assert set(cohorts)==set(range(1,101))
+    expected=Counter(int(r['herb_count']) for r in herbs)
+    for rows in cohorts.values():
+        assert len(rows)==len({r['composition_id'] for r in rows})==2009
+        assert Counter(int(r['ingredient_count']) for r in rows)==expected
+    return herbs,cohorts
+
+
+def structure_read_pairs(path):
+    with gzip.open(path,'rt',encoding='utf-8',newline='') as h:
+        rows=list(csv.DictReader(h))
+    for r in rows:
+        for key in ('occurrence_a','occurrence_b','observed'): r[key]=int(r[key])
+        for key in ('null_mean','null_sd','excess','standardized_excess','p_upper','q_bh'):r[key]=float(r[key])
+        r['network_edge']=r['network_edge']=='True'
+    return rows
+
+
+def structure_font():
+    from matplotlib import font_manager
+    for path in font_manager.findSystemFonts():
+        if 'Nanum' in path:
+            try: font_manager.fontManager.addfont(path)
+            except Exception: pass
+    for name in ('AppleGothic','NanumGothic','Noto Sans CJK KR','Malgun Gothic'):
+        try:
+            font_manager.findfont(name,fallback_to_default=False)
+            return name
+        except ValueError: pass
+    raise RuntimeError('A Korean font is required: install fonts-nanum in Colab/Linux.')
+
+
+def structure_save(fig,out,stem):
+    for ext in ('png','svg','pdf'):
+        metadata={'Date':None} if ext=='svg' else ({'CreationDate':None,'ModDate':None} if ext=='pdf' else None)
+        fig.savefig(out/f'{stem}.{ext}',dpi=400,bbox_inches='tight',facecolor='white',metadata=metadata)
+    plt.close(fig)
+    path=out/f'{stem}.svg';path.write_text('\n'.join(x.rstrip() for x in path.read_text().splitlines())+'\n')
+
+
+def make_structure_figures(work_dir,figures):
+    import networkx as nx
+    out=work_dir/'structure';figures.mkdir(parents=True,exist_ok=True)
+    font=structure_font()
+    with mpl.rc_context({'font.family':'sans-serif','font.sans-serif':['Arial','Helvetica','DejaVu Sans'],
+        'font.size':9,'axes.linewidth':.8,'axes.spines.top':False,'axes.spines.right':False,
+        'svg.fonttype':'none','svg.hashsalt':'HerbalFormulaCompletion-structure'}):
+        frequencies=read_rows(out/'ingredient_frequencies.csv')
+        fig,axs=plt.subplots(1,2,figsize=(9,3.8))
+        for ax,domain,title in zip(axs,('herbal','food'),('A  Herbal','B  Food')):
+            for basis,color,style,label in [('source_records','#222222','-','Source records'),('unique_compositions','#888888','--','Unique compositions')]:
+                rows=[r for r in frequencies if r['domain']==domain and r['basis']==basis]
+                ax.plot([int(r['rank']) for r in rows],[100*float(r['prevalence']) for r in rows],
+                    color=color,ls=style,lw=1.2,label=label)
+            inset=ax.inset_axes([.45,.32,.5,.43])
+            for basis,color,style in [('source_records','#222222','-'),('unique_compositions','#888888','--')]:
+                sub=[r for r in frequencies if r['domain']==domain and r['basis']==basis]
+                inset.plot([int(r['rank']) for r in sub],[100*float(r['prevalence']) for r in sub],color=color,ls=style,lw=.8)
+            inset.set_xscale('log');inset.set_yscale('log');inset.set_xlim(1,2000);inset.set_ylim(.0005,100)
+            inset.tick_params(labelsize=6);inset.set_title('Log–log view',fontsize=7,loc='left')
+            ax.set_xlim(0,1500);ax.set_ylim(0,60);ax.set_xlabel('Ingredient frequency rank')
+            ax.set_ylabel('Records containing ingredient (%)');ax.set_title(title,loc='left',fontsize=10)
+            ax.legend(frameon=False,fontsize=8)
+        fig.tight_layout();structure_save(fig,figures,'Figure3_ingredient_frequency')
+
+        fig,axs=plt.subplots(1,2,figsize=(9,3.6))
+        before=np.array([[1,1,1,0,0,0],[0,0,0,1,1,1]])
+        after=np.array([[1,0,1,1,0,0],[0,1,0,0,1,1]])
+        labels=['황금','황련','감초','당귀','천궁','작약']
+        for ax,data,title in zip(axs,(before,after),('Before trade','After trade')):
+            ax.imshow(data,cmap='Greys',vmin=0,vmax=1,aspect='equal')
+            ax.set_xticks(range(6),labels,fontfamily=font,fontsize=10)
+            ax.set_yticks([0,1],['Formula A','Formula B'])
+            for (i,j),value in np.ndenumerate(data):
+                ax.text(j,i,str(value),ha='center',va='center',color='white' if value else '#333333',fontsize=10)
+            for i in range(2):ax.text(6,i,f'{data[i].sum()} herbs',va='center',fontsize=9)
+            ax.text(-.6,2,'Counts:',ha='right',fontsize=8)
+            for j in range(6):ax.text(j,2,str(data[:,j].sum()),ha='center',fontsize=9)
+            ax.set_title(title,fontsize=10);ax.set_xlim(-.5,7.1);ax.set_ylim(2.6,-.7)
+            ax.tick_params(length=0);ax.spines[['left','bottom']].set_visible(False)
+        fig.text(.5,.02,'Illustrative binary compositions: row sizes and ingredient counts are unchanged.',ha='center',fontsize=9)
+        fig.tight_layout(rect=[0,.08,1,1]);structure_save(fig,figures,'Figure4_fixed_margin_trade')
+
+        pairs={d:structure_read_pairs(out/f'cohorts/{d}_{r:03d}/pair_results.csv.gz')
+               for d,r in [('herbal',0),('food',1)]}
+        fig,axs=plt.subplots(1,2,figsize=(9,4))
+        for ax,domain,title in zip(axs,('herbal','food'),('A  Herbal','B  Food sample 1')):
+            rows=pairs[domain]
+            for significant,color,label in [(False,'#bdbdbd','Other tested pairs'),(True,'#222222','Enriched (BH q ≤ 0.05)')]:
+                subset=[r for r in rows if (r['q_bh']<=.05 and r['excess']>0)==significant]
+                ax.scatter([r['null_mean'] for r in subset],[r['observed'] for r in subset],s=5,color=color,alpha=.5,label=label,rasterized=True)
+            limit=max(max(r['null_mean'],r['observed']) for r in rows)*1.07
+            ax.plot([0,limit],[0,limit],color='#888888',lw=.8,ls='--')
+            ax.set_xlim(0,limit);ax.set_ylim(0,limit);ax.set_aspect('equal')
+            ax.set_xlabel('Mean co-occurrence in randomized data');ax.set_ylabel('Observed co-occurrence')
+            ax.set_title(title,loc='left',fontsize=10);ax.legend(frameon=False,fontsize=7,loc='upper left')
+            marked = sorted(rows, key=lambda r: (-r['excess'], r['ingredient_a'], r['ingredient_b']))[:3]
+            for j, r in enumerate(marked):
+                ax.annotate(r['ingredient_a']+'–'+r['ingredient_b'], (r['null_mean'],r['observed']),
+                    xytext=(.62,.43-j*.08), textcoords='axes fraction', fontsize=7,
+                    bbox={'facecolor':'white','edgecolor':'none','pad':1},
+                    fontfamily=font if domain=='herbal' else 'DejaVu Sans',
+                    arrowprops={'arrowstyle':'-', 'color':'#777777','lw':.5})
+        fig.tight_layout();structure_save(fig,figures,'Figure5_observed_vs_randomized')
+
+        herbal=pairs['herbal']
+        all_edges=sorted([r for r in herbal if r['network_edge']],key=lambda r:(-r['excess'],r['ingredient_a'],r['ingredient_b']))
+        display_edges=all_edges[:40]
+        graph=nx.Graph()
+        for r in display_edges:graph.add_edge(r['ingredient_a'],r['ingredient_b'],weight=r['excess'])
+        fig,ax=plt.subplots(figsize=(9,6))
+        if graph:
+            components=sorted(nx.connected_components(graph),key=lambda c:(-len(c),sorted(c)))
+            pos={}
+            for ci,component in enumerate(components):
+                sub=graph.subgraph(sorted(component)).copy()
+                local=nx.spring_layout(sub,seed=STRUCTURE_SEED,weight=None,iterations=500,k=1.3/math.sqrt(len(sub)))
+                if ci==0:
+                    for x,v in local.items():pos[x]=np.array([1.6*v[0],1.4*v[1]])
+                else:
+                    cy=1.2-(ci-1)*1.2
+                    for x,v in local.items():pos[x]=np.array([2.8+.45*v[0],cy+.3*v[1]])
+            # Resolve close labels without treating layout coordinates as measured distances.
+            main_nodes=sorted(components[0])
+            for _ in range(100):
+                for i,a in enumerate(main_nodes):
+                    for b in main_nodes[i+1:]:
+                        delta=pos[b]-pos[a];distance=float(np.linalg.norm(delta))
+                        if 0<distance<.38:
+                            shift=.5*(.38-distance)*delta/distance
+                            pos[a]-=shift;pos[b]+=shift
+            freq={r['ingredient']:int(r['count']) for r in frequencies if r['domain']=='herbal' and r['basis']=='unique_compositions'}
+            nx.draw_networkx_edges(graph,pos,ax=ax,width=[.5+3*graph[a][b]['weight']/max(r['excess'] for r in display_edges) for a,b in graph.edges],edge_color='#888888',alpha=.75)
+            nx.draw_networkx_nodes(graph,pos,ax=ax,node_size=[150+900*freq[x]/2009 for x in graph],node_color='white',edgecolors='#555555',linewidths=.7)
+            nx.draw_networkx_labels(graph,pos,ax=ax,font_family=font,font_size=9,
+                bbox={'facecolor':'white','edgecolor':'none','alpha':.85,'pad':.5})
+            position_rows=[{'ingredient':x,'x':float(pos[x][0]),'y':float(pos[x][1]),'unique_occurrences':freq[x]} for x in sorted(graph)]
+            write_csv(out/'network_nodes.csv',tuple(position_rows[0]),position_rows)
+        else: ax.text(.5,.5,'No pairs met the prespecified network criteria.',ha='center',transform=ax.transAxes)
+        ax.axis('off');ax.margins(.15)
+        ax.set_title('Herbal co-occurrence network',fontsize=11)
+        fig.text(.5,.025,'Top 40 edges by excess co-occurrence; BH q ≤ 0.05 and observed count ≥ 10.',ha='center',fontsize=8)
+        structure_save(fig,figures,'Figure6_herbal_relationships')
+        if display_edges:write_csv(out/'network_edges.csv',tuple(display_edges[0]),display_edges)
+        herbs=read_rows(work_dir/'herbal/unique_compositions.csv')
+        examples=[]
+        for r in display_edges:
+            target={r['ingredient_a'],r['ingredient_b']}
+            supporting=[x for x in herbs if target<=set(x['herbs'].split('|'))]
+            for x in sorted(supporting,key=lambda x:(-int(x['weight']),x['composition_id']))[:3]:
+                examples.append({'ingredient_a':r['ingredient_a'],'ingredient_b':r['ingredient_b'],
+                    'composition_id':x['composition_id'],'formula_names':x['formula_names'],
+                    'herbs':x['herbs'],'source_weight':x['weight']})
+        if examples:write_csv(out/'network_formula_examples.csv',tuple(examples[0]),examples)
+
+        # Draw full null distributions for descriptive, explicitly selected pairs.
+        with np.load(out/'cohorts/herbal_000/illustrative_nulls.npz') as data:
+            fig,axs=plt.subplots(2,3,figsize=(10,5.5))
+            for j,ax in enumerate(axs.flat):
+                if j>=len(data['labels']):ax.axis('off');continue
+                values=data['counts'][:,j];obs=int(data['observed'][j])
+                ax.hist(values,bins=np.arange(values.min()-.5,values.max()+1.5),color='#bdbdbd',edgecolor='white')
+                ax.axvline(obs,color='#222222',lw=1.2,label=f'Observed: {obs}')
+                ax.set_title(str(data['labels'][j]),fontfamily=font,fontsize=10)
+                ax.set_xlabel('Co-occurrence count');ax.set_ylabel('Randomized matrices');ax.legend(frameon=False,fontsize=7)
+            fig.tight_layout();structure_save(fig,figures,'FigureS2_pair_null_distributions')
+        summaries=read_rows(out/'cohort_summary.csv')
+        fig,axs=plt.subplots(1,2,figsize=(9,3.7))
+        food=[r for r in summaries if r['domain']=='food' and r['basis']=='unique_compositions']
+        herb=next(r for r in summaries if r['domain']=='herbal' and r['basis']=='unique_compositions')
+        axs[0].hist([float(r['repeated_pair_observed_expected']) for r in food],bins=15,color='#bdbdbd',edgecolor='white',label='100 food samples')
+        axs[0].axvline(float(herb['repeated_pair_observed_expected']),color='#222222',label='Herbal')
+        axs[0].axvline(1,color='#888888',ls='--',lw=.8)
+        axs[0].set_xlabel('Repeated pair count: observed / null mean');axs[0].set_ylabel('Food samples');axs[0].legend(frameon=False,fontsize=8)
+        traces=read_rows(out/'cohorts/herbal_000/mixing_trace.csv')
+        for chain,color in [('1','#222222'),('2','#aaaaaa')]:
+            vals=[r for r in traces if r['chain']==chain]
+            axs[1].plot([int(r['draw']) for r in vals],[float(r['incidence_overlap']) for r in vals],color=color,lw=.5,label='Chain '+chain)
+        axs[1].set_xlabel('Retained null draw');axs[1].set_ylabel('Original incidence retained');axs[1].legend(frameon=False,fontsize=8)
+        fig.tight_layout();structure_save(fig,figures,'FigureS3_null_summary_and_mixing')
+    captions={
+      'Figure3':'Ingredient rank–frequency distributions. Frequencies are proportions of eligible preprocessed source records (weights retained) or unique compositions. Food uses all 770,945 unique compositions, representing 921,927 eligible source records; herbal uses 2,009 unique compositions, representing 2,992 eligible source records. Main panels use the same linear axes; insets use the same logarithmic axes to show the tails. No power-law fit is claimed.',
+      'Figure4':'Illustration of a valid Curveball trade. Shared ingredients are retained; ingredients unique to the two selected compositions are randomly redistributed while keeping each row size. This simple example exchanges Hwangryeon and Danggwi. It is schematic, not two named recorded prescriptions. Repeated trades preserve every ingredient column total and every composition row total.',
+      'Figure5':'Observed and fixed-margin null co-occurrence counts. Each point is an unordered pair of ingredients occurring in at least 10 unique compositions; observed-zero pairs are included in the testing family. Black points indicate positive enrichment with Benjamini–Hochberg q≤0.05 from one-sided Monte Carlo tests. The diagonal denotes observed equals null mean. The three pairs with the greatest positive excess in each panel are labeled descriptively. Food sample 1 was selected by its predefined replicate number, not by its result; all 100 food samples were analyzed and saved.',
+      'Figure6':'Descriptive herbal co-occurrence network. The 40 largest positive excesses (observed minus null mean) among pairs with BH q≤0.05 and observed co-occurrence≥10 are displayed. Node area reflects ingredient occurrence in unique compositions; edge width reflects excess co-occurrence. Each displayed connected component uses a fixed-seed force layout; components are placed separately for readability. Positions are not a calibrated distance or evidence of therapeutic synergy. Apparent disconnected groups may result from displaying only 40 edges. All eligible pairs and supporting recorded compositions are provided in CSV files.',
+      'FigureS2':'Null distributions for four herbal pairs with the greatest observed-minus-null excess, plus Hwanggeum–Hwangryeon and Mokdanpi–Sansuyu when eligible. Selection is illustrative and is explicitly data-dependent for the first four panels; inferential adjustment covers all eligible pairs.',
+      'FigureS3':'Repeated co-occurrence concentration and mixing diagnostics. For each eligible ingredient pair, count the unordered pairs of compositions that both contain that ingredient pair, then sum across ingredient pairs. The observed total is divided by its null mean. The food histogram uses all 100 matched samples. The herbal trace shows retained-incidence overlap with the initial matrix in two independent seeded chains; these checks do not prove exact independent sampling.'}
+    (figures/'Structure_figure_captions.txt').write_text('\n\n'.join(k+'. '+v for k,v in captions.items())+'\n')
+
+
+def analyze_structure(work_dir,workers=2,draws=1999):
+    from concurrent.futures import ProcessPoolExecutor,as_completed
+    import platform
+    import numba,networkx
+    work_dir=Path(work_dir);out=work_dir/'structure';out.mkdir(parents=True,exist_ok=True)
+    hashes={name:hashlib.sha256((work_dir/name).read_bytes()).hexdigest() for name in (
+        'herbal/unique_compositions.csv','food/unique_compositions.csv','matching/membership.csv')}
+    manifest={'status':'running','seed':STRUCTURE_SEED,'null_draws_per_cohort':draws,'chains':2,
+        'minimum_occurrences':STRUCTURE_MIN_OCCURRENCES,'primary_basis':'unique compositions, source multiplicities not used',
+        'frequency_plot_basis':'eligible preprocessed source records and unique compositions, both shown',
+        'null_model':'binary fixed row and column margins via Curveball trades; row duplicates allowed in null matrices',
+        'references':{'food_null_model_motivation':'10.1038/srep00196','curveball_algorithm':'10.1038/ncomms5114'},
+        'source_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        'input_hashes':hashes,'algorithm_sha256':structure_algorithm_hash(),'software':{'python':platform.python_version(),'numpy':np.__version__,'numba':numba.__version__,'networkx':networkx.__version__},
+        'not_performed':'No clinical efficacy, no formula-family holdout, no retraining of recommendation models on randomized data.'}
+    (out/'metadata.json').write_text(json.dumps(manifest,indent=2)+'\n')
+    herbs,foods=structure_frequency_tables(work_dir,out)
+    tasks=[('herbal',0,herbs,'herbs',out/'cohorts/herbal_000',draws,False,0)]
+    tasks += [('food',rep,rows,'ingredients',out/f'cohorts/food_{rep:03d}',draws,False,0) for rep,rows in sorted(foods.items())]
+    print('Structure: herbal fixed-margin null model',flush=True)
+    summaries=[structure_cohort(tasks[0])]
+    print('Structure: herbal complete; evaluating all 100 food samples',flush=True)
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures=[pool.submit(structure_cohort,t) for t in tasks[1:]]
+        for done,f in enumerate(as_completed(futures),1):
+            summaries.append(f.result())
+            if done==1 or done%10==0:print(f'Structure food samples complete: {done}/100',flush=True)
+    print('Structure: source-record sensitivity and longer-trade sensitivity',flush=True)
+    weighted=structure_cohort(('herbal',0,herbs,'herbs',out/'sensitivity/herbal_source_records',draws,True,0))
+    longer=structure_cohort(('herbal',0,herbs,'herbs',out/'sensitivity/herbal_longer_trades',draws,False,10))
+    summaries.sort(key=lambda r:(r['domain'],r['replicate']))
+    write_csv(out/'cohort_summary.csv',tuple(summaries[0]),summaries)
+    write_csv(out/'sensitivity_summary.csv',tuple(weighted),[weighted,longer])
+    primary=structure_read_pairs(out/'cohorts/herbal_000/pair_results.csv.gz')
+    sensitivity=[]
+    for label,folder in [('source_records','herbal_source_records'),('longer_trades','herbal_longer_trades')]:
+        other=structure_read_pairs(out/f'sensitivity/{folder}/pair_results.csv.gz')
+        lookup={(r['ingredient_a'],r['ingredient_b']):r for r in other}
+        edges=[r for r in primary if r['network_edge']]
+        both=sum(lookup.get((r['ingredient_a'],r['ingredient_b']),{}).get('network_edge',False) for r in edges)
+        sensitivity.append({'comparison':label,'primary_edges':len(edges),'also_selected':both,
+                            'retained_fraction':both/len(edges) if edges else ''})
+    write_csv(out/'network_sensitivity.csv',tuple(sensitivity[0]),sensitivity)
+    make_structure_figures(work_dir,ROOT/'figures')
+    manifest.update(status='complete',primary_cohorts=len(summaries),sensitivity_runs=2,
+        all_saved_draw_margins_verified=True,total_null_draws=draws*(len(summaries)+2))
+    (out/'metadata.json').write_text(json.dumps(manifest,indent=2)+'\n')
+    print('Complete: work/structure and Figures 3–6 (plus S2–S3)',flush=True)
+    return summaries
+
+
+
 def heading(text):
     print(f"\n{text}\n{'-' * len(text)}", flush=True)
 
 
-def main(workers=2):
+def main(workers=2, null_draws=1999):
     herbal_dir = ROOT / "data/herbal"
     herbal_files = sorted(herbal_dir.glob("*.csv"))
     if len(herbal_files) != 5:
@@ -1198,16 +1704,25 @@ def main(workers=2):
     make_figure1(herbal_counts, food_counts)
     heading("Full recommendation evaluation")
     evaluate_all(ROOT / "work", workers=workers)
+    analyze_structure(ROOT / "work", workers=workers, draws=null_draws)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--evaluate-only", action="store_true")
+    parser.add_argument("--structure-only", action="store_true")
+    parser.add_argument("--null-draws", type=int, default=1999)
     parser.add_argument("--workers", type=int, default=2)
     args = parser.parse_args()
+    if args.evaluate_only and args.structure_only:
+        parser.error("Choose only one of --evaluate-only and --structure-only")
     if args.workers < 1:
         parser.error("--workers must be at least 1")
-    if args.evaluate_only:
+    if args.null_draws < 99:
+        parser.error("--null-draws must be at least 99")
+    if args.structure_only:
+        analyze_structure(ROOT / "work", workers=args.workers, draws=args.null_draws)
+    elif args.evaluate_only:
         evaluate_all(ROOT / "work", workers=args.workers)
     else:
-        main(workers=args.workers)
+        main(workers=args.workers, null_draws=args.null_draws)
