@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Reproduce preprocessing, recommendation evaluation, and fixed-margin structure analysis.
+"""Reproduce preprocessing, recommendation evaluation, structure, and training-null controls.
 
 Local setup: python -m pip install "matplotlib>=3.9,<4" "tqdm>=4.66,<5" "numba>=0.61,<0.68" "networkx>=3.4,<4"
 Run: python run.py
+Training-only control after evaluation: python run.py --predictive-null-only --predictive-draws 20
 Generated tables and counts are written to work/.
 """
 
@@ -1616,11 +1617,400 @@ def analyze_structure(work_dir,workers=2,draws=1999):
 
 
 
+# Predictive control: keep the observed test problems fixed, randomize training only.
+@njit(cache=True)
+def predictive_pair_counts(matrix, lengths, k):
+    p = np.zeros((k, k), np.float64)
+    for r in range(len(lengths)):
+        for i in range(lengths[r]):
+            a = matrix[r, i]
+            for j in range(i + 1, lengths[r]):
+                b = matrix[r, j]
+                p[a, b] += 1
+                p[b, a] += 1
+    return p
+
+
+@njit(cache=True)
+def predictive_nminus1_hits(test, lengths, counts, pairs):
+    """Exact Top-10 target membership; same arithmetic/order/ties as evaluate_cohort."""
+    k = len(counts)
+    conditional = pairs / counts.reshape((k, 1))
+    jaccard = pairs / (counts.reshape((k, 1)) + counts.reshape((1, k)) - pairs)
+    hits = np.zeros((int(lengths.sum()), 3), np.uint8)
+    case = 0
+    for r in range(len(lengths)):
+        n = lengths[r]
+        for omitted in range(n - 1, -1, -1):
+            target = test[r, omitted]
+            if target >= 0:
+                excluded = np.zeros(k, np.uint8)
+                conditional_scores = np.zeros(k)
+                jaccard_scores = np.zeros(k)
+                for j in range(n):
+                    if j == omitted: continue
+                    observed = test[r, j]
+                    if observed >= 0:
+                        excluded[observed] = 1
+                        for v in range(k):
+                            conditional_scores[v] += conditional[observed, v]
+                            jaccard_scores[v] += jaccard[observed, v]
+                # Division is retained to reproduce existing floating-point ranking exactly.
+                conditional_scores /= n - 1
+                jaccard_scores /= n - 1
+                ranks = np.ones(3, np.int64)
+                for v in range(k):
+                    if excluded[v] or v == target: continue
+                    if counts[v] > counts[target] or (counts[v] == counts[target] and v < target): ranks[0] += 1
+                    if conditional_scores[v] > conditional_scores[target] or (conditional_scores[v] == conditional_scores[target] and v < target): ranks[1] += 1
+                    if jaccard_scores[v] > jaccard_scores[target] or (jaccard_scores[v] == jaccard_scores[target] and v < target): ranks[2] += 1
+                for m in range(3): hits[case, m] = ranks[m] <= 10
+            case += 1
+    return hits
+
+
+@njit(cache=True)
+def predictive_shuffle(original, lengths, seed, trades_per_row):
+    np.random.seed(seed)
+    shuffled = original.copy()
+    for _ in range(trades_per_row * len(lengths)):
+        curveball_trade(shuffled, lengths)
+    return shuffled
+
+
+def predictive_null_code_hash():
+    import inspect
+    import numba
+    functions = (curveball_trade.py_func, predictive_pair_counts.py_func,
+                 predictive_nminus1_hits.py_func, predictive_shuffle.py_func,
+                 predictive_null_cohort, assign_composition_folds, structure_prepare)
+    return hashlib.sha256((''.join(inspect.getsource(f) for f in functions)
+                           + np.__version__ + numba.__version__).encode()).hexdigest()
+
+
+def predictive_null_cohort(task):
+    domain, replicate, rows, field, output, draws, trades_per_row, seed, baseline_dir = task
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    signature = {'domain': domain, 'replicate': replicate, 'draws': draws,
+                 'trades_per_row': trades_per_row, 'seed': seed,
+                 'algorithm_sha256': predictive_null_code_hash(),
+                 'input_sha256': hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()}
+    meta_path = output / 'metadata.json'
+    if meta_path.exists():
+        old = json.loads(meta_path.read_text())
+        if old.get('status') == 'complete' and all(old.get(k) == v for k, v in signature.items()) and all((output / x).exists() for x in ('draw_results.csv', 'case_hits.npz', 'ingredient_results.csv', 'case_results.csv.gz')):
+            return read_rows(output / 'draw_results.csv')
+    meta_path.write_text(json.dumps(dict(signature, status='running'), indent=2))
+    folds = assign_composition_folds(rows, ingredient_field=field)
+    cases, composition_results, audits, fold_assignments = [], [], [], []
+    observed_parts, null_parts = [], []
+    existing = {}
+    baseline_path = Path(baseline_dir) / 'composition_results.csv.gz'
+    if not baseline_path.exists():
+        raise FileNotFoundError('Run --evaluate-only first; the control must verify the original N-1 results.')
+    with gzip.open(baseline_path, 'rt', encoding='utf-8') as f:
+        for r in csv.DictReader(f):
+            if r['condition'] == 'N-1': existing[r['composition_id'], r['method']] = float(r['performance'])
+    baseline_checks = 0
+    for fold_index, test_rows in enumerate(folds):
+        train = [r for j, fold in enumerate(folds) if j != fold_index for r in fold]
+        vocab, original, lengths, frequency, *_ = structure_prepare(train, field, weighted=True)
+        index = {v: i for i, v in enumerate(vocab)}
+        counts = frequency.astype(np.float64)
+        test = np.full((len(test_rows), 19), -1, np.int64)
+        test_lengths = np.array([len(r[field].split('|')) for r in test_rows], np.int64)
+        original_sets = {tuple(sorted(r[field].split('|'))) for r in train}
+        for j, r in enumerate(test_rows):
+            items = sorted(r[field].split('|'))
+            assert tuple(items) not in original_sets
+            test[j, :len(items)] = [index.get(x, -1) for x in items]
+            fold_assignments.append({'composition_id': r['composition_id'], 'test_fold': fold_index + 1})
+            for target in reversed(items):
+                cases.append({'fold': fold_index + 1, 'composition_id': r['composition_id'],
+                              'ingredient_count': len(items), 'target': target,
+                              'input': '|'.join(x for x in items if x != target),
+                              'training_source_count': int(frequency[index[target]]) if target in index else 0,
+                              'training_source_rows': len(original)})
+        p = predictive_pair_counts(original, lengths, len(vocab))
+        observed = predictive_nminus1_hits(test, test_lengths, counts, p)
+        null = np.empty((draws, len(observed), 3), np.uint8)
+        # A shuffled row can match a test composition by chance; record but do not reject it.
+        # Rejection would condition the null on the held-out answers.
+        test_keys = {tuple(sorted(vocab[x] for x in row[:n]))
+                     for row, n in zip(test, test_lengths) if np.all(row[:n] >= 0)}
+        for draw in range(draws):
+            draw_seed = seed + replicate * 100000 + fold_index * 1000 + draw
+            shuffled = predictive_shuffle(original, lengths, draw_seed, trades_per_row)
+            if not np.array_equal(np.bincount(shuffled[shuffled >= 0], minlength=len(vocab)), frequency):
+                raise AssertionError('Weighted ingredient frequencies changed')
+            if not np.array_equal((shuffled >= 0).sum(axis=1), lengths):
+                raise AssertionError('Source-record lengths changed')
+            accidental = 0
+            overlap = 0
+            for row, before, n in zip(shuffled, original, lengths):
+                if len(set(row[:n])) != n: raise AssertionError('Duplicate ingredient in shuffled row')
+                overlap += len(set(row[:n]) & set(before[:n]))
+                accidental += tuple(sorted(vocab[x] for x in row[:n])) in test_keys
+            null[draw] = predictive_nminus1_hits(test, test_lengths, counts,
+                                               predictive_pair_counts(shuffled, lengths, len(vocab)))
+            if not np.array_equal(observed[:, 0], null[draw, :, 0]):
+                raise AssertionError('Popularity changed despite preserved frequencies')
+            audits.append({'fold': fold_index + 1, 'draw': draw + 1, 'seed': draw_seed,
+                           'training_source_rows': len(original), 'test_unique': len(test_rows),
+                           'margin_checks_passed': True, 'popularity_identical': True,
+                           'source_slot_overlap': overlap / int(lengths.sum()),
+                           'chance_test_matches_in_randomized_rows': accidental})
+        offset = 0
+        for row, n in zip(test_rows, test_lengths):
+            for m, method in enumerate(EVALUATION_MODELS):
+                value = float(observed[offset:offset + n, m].mean())
+                if not math.isclose(value, existing[row['composition_id'], method], abs_tol=1e-14):
+                    raise AssertionError('Observed baseline differs from existing evaluation')
+                baseline_checks += 1
+                composition_results.append({'fold': fold_index + 1, 'composition_id': row['composition_id'],
+                    'method': method, 'observed': value,
+                    'randomized_mean': float(null[:, offset:offset+n, m].mean()),
+                    'difference': value - float(null[:, offset:offset+n, m].mean())})
+            offset += n
+        observed_parts.append(observed)
+        null_parts.append(null)
+    observed = np.concatenate(observed_parts)
+    randomized = np.concatenate(null_parts, axis=1)
+    # Every composition contributes equally, independently of its ingredient count.
+    case_weights = np.array([1 / int(r['ingredient_count']) / len(rows) for r in cases])
+    observed_scores = (observed * case_weights[:, None]).sum(axis=0)
+    null_scores = (randomized * case_weights[None, :, None]).sum(axis=1)
+    results = []
+    for d in range(draws):
+        for m, method in enumerate(EVALUATION_MODELS):
+            results.append({'domain': domain, 'replicate': replicate, 'draw': d+1, 'method': method,
+                            'observed': float(observed_scores[m]), 'randomized': float(null_scores[d, m]),
+                            'difference': float(observed_scores[m] - null_scores[d, m])})
+    np.savez_compressed(output / 'case_hits.npz', observed=observed, randomized=randomized,
+                        composition_id=np.array([r['composition_id'] for r in cases]),
+                        target=np.array([r['target'] for r in cases]), case_weights=case_weights)
+    records, ingredient_accum = [], defaultdict(list)
+    random_mean = randomized.mean(axis=0)
+    for j, case in enumerate(cases):
+        for m, method in enumerate(EVALUATION_MODELS):
+            item = dict(case, method=method, observed_hit=int(observed[j,m]),
+                        randomized_hit_rate=float(random_mean[j,m]),
+                        difference=float(observed[j,m]-random_mean[j,m]))
+            records.append(item)
+            ingredient_accum[case['target'], method].append(item)
+    with gzip.open(output / 'case_results.csv.gz', 'wt', encoding='utf-8', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=tuple(records[0])); writer.writeheader(); writer.writerows(records)
+    ingredients = []
+    for (target, method), values in sorted(ingredient_accum.items()):
+        ingredients.append({'ingredient': target, 'method': method, 'test_cases': len(values),
+            'observed_hit_rate': sum(r['observed_hit'] for r in values)/len(values),
+            'randomized_hit_rate': sum(r['randomized_hit_rate'] for r in values)/len(values),
+            'difference': sum(r['difference'] for r in values)/len(values),
+            'mean_training_source_count': sum(r['training_source_count'] for r in values)/len(values)})
+    for filename, values in [('draw_results.csv', results), ('fold_audit.csv', audits),
+                             ('composition_results.csv', composition_results),
+                             ('ingredient_results.csv', ingredients), ('fold_assignments.csv', fold_assignments)]:
+        write_csv(output / filename, tuple(values[0]), values)
+    metadata = dict(signature, status='complete', compositions=len(rows), cases=len(cases),
+                    baseline_composition_checks=baseline_checks, all_draw_margin_checks_passed=True,
+                    popularity_identical_in_every_case=True,
+                    training='Source multiplicities expanded after fold assignment; each source row has weight 1.',
+                    test='Observed test compositions and all N-1 problems remain fixed.',
+                    source_slot_overlap_mean=float(np.mean([r['source_slot_overlap'] for r in audits])),
+                    chance_test_matches_total=sum(r['chance_test_matches_in_randomized_rows'] for r in audits))
+    meta_path.write_text(json.dumps(metadata, indent=2) + '\n')
+    return results
+
+
+def make_predictive_null_figure(output, figures):
+    output, figures = Path(output), Path(figures)
+    summary = read_rows(output / 'summary.csv')
+    figures.mkdir(parents=True, exist_ok=True)
+    with mpl.rc_context({'font.family': 'sans-serif', 'font.sans-serif': ['Arial','DejaVu Sans'],
+                         'font.size': 9, 'axes.linewidth': .8, 'axes.spines.top': False,
+                         'axes.spines.right': False, 'svg.fonttype': 'none',
+                         'svg.hashsalt': 'HerbalFormulaCompletion'}):
+        fig, axes = plt.subplots(1, 2, figsize=(9, 3.9), sharey=True)
+        for ax, domain, title in zip(axes, ('herbal', 'food'), ('A  Herbal', 'B  Food')):
+            selected = [next(r for r in summary if r['domain']==domain and r['method']==m) for m in EVALUATION_MODELS]
+            original = [100*float(r['observed']) for r in selected]
+            shuffled = [100*float(r['randomized_mean']) for r in selected]
+            x = np.arange(3); width=.32
+            ax.bar(x-width/2, original, width, color='#222222', label='Original training data')
+            ax.bar(x+width/2, shuffled, width, color='#bdbdbd', edgecolor='#555555', linewidth=.5,
+                   label='Randomized training data')
+            for i,r in enumerate(selected):
+                ax.text(i, max(original[i],shuffled[i])+1.5,
+                        f"{100*float(r['difference']):+.1f} pp", ha='center', fontsize=8)
+            ax.set_title(title, loc='left')
+            ax.set_xticks(x, ['Popularity','Mean conditional\nprobability','Mean pairwise\nJaccard'])
+            ax.set_ylim(0,65);ax.set_yticks(np.arange(0,61,10))
+        axes[0].set_ylabel('Hit@10 (%)')
+        axes[0].legend(frameon=False, loc='upper left', fontsize=8)
+        fig.tight_layout()
+        structure_save(fig, figures, 'Figure7_training_randomization')
+    draws = int(json.loads((output/'metadata.json').read_text())['draws'])
+    caption = ('Fig. 7. Recommendation performance with original and randomized training data. '
+        'Observed test compositions, five-fold assignments, and all leave-one-ingredient-out problems were held fixed. '
+        'Within each training fold, source-record multiplicities were expanded before Curveball randomization, '
+        'preserving each source-record length and the weighted occurrence count of every ingredient. '
+        f'Gray bars average {draws} independently seeded finite randomization runs per cohort; '
+        'food bars additionally average the 100 matched food samples. '
+        'Performance was averaged within each composition and then equally across compositions. '
+        'Labels show original minus randomized performance in percentage points (pp). '
+        'Popularity predictions were identical in every original and randomized test case. '
+        'This is a descriptive training-data ablation; the repeated runs are not independent datasets or a confidence interval. '
+        'All run-level values and finite-randomization sensitivity results are provided with the code.')
+    (figures/'Figure7_caption.txt').write_text(caption+'\n')
+
+
+def make_predictive_ingredient_outputs(work_dir, figures):
+    work_dir, figures = Path(work_dir), Path(figures)
+    out = work_dir/'predictive_null'
+    ingredients = read_rows(out/'cohorts/herbal_000/ingredient_results.csv')
+    by_key = {(r['ingredient'],r['method']):r for r in ingredients}
+    detailed=[]
+    for r in ingredients:
+        if r['method']=='popularity': continue
+        popular=by_key[r['ingredient'],'popularity']
+        detailed.append(dict(r, popularity_hit_rate=float(popular['observed_hit_rate']),
+            original_minus_popularity=float(r['observed_hit_rate'])-float(popular['observed_hit_rate']),
+            randomized_minus_popularity=float(r['randomized_hit_rate'])-float(popular['observed_hit_rate'])))
+    write_csv(out/'herbal_ingredient_comparison.csv',tuple(detailed[0]),detailed)
+    eligible=[r for r in detailed if int(r['test_cases'])>=10]
+    selected=[]
+    for method in ('mean_conditional','mean_jaccard'):
+        ordered=sorted((r for r in eligible if r['method']==method),key=lambda r:(-float(r['original_minus_popularity']),-int(r['test_cases']),r['ingredient']))
+        selected.extend(dict(r,rank=i+1,selection='Top original-minus-Popularity gain among herbs in >=10 compositions') for i,r in enumerate(ordered[:10]))
+    write_csv(out/'herbal_top_gains.csv',tuple(selected[0]),selected)
+    herbs={r['composition_id']:r for r in read_rows(work_dir/'herbal/unique_compositions.csv')}
+    with gzip.open(out/'cohorts/herbal_000/case_results.csv.gz','rt',encoding='utf-8') as f:
+        cases=list(csv.DictReader(f))
+    # Transparent, deterministic illustration selection: no manual choice of successful herbs.
+    chosen_targets=[r['ingredient'] for r in selected if r['method']=='mean_conditional'][:3]
+    examples=[]
+    buckets=assign_composition_folds(list(herbs.values()))
+    fold_stats={i+1:training_statistics([r for j,f in enumerate(buckets) if j!=i for r in f]) for i in range(5)}
+    for target in chosen_targets:
+        candidates=[r for r in cases if r['target']==target and r['method']=='mean_conditional']
+        for success in ('1','0'):
+            chosen=sorted((r for r in candidates if r['observed_hit']==success),key=lambda r:r['composition_id'])[:2]
+            for r in chosen:
+                counts,pairs=fold_stats[int(r['fold'])]
+                recommendations=sorted(recommendation_scores(r['input'].split('|'),counts,pairs),key=lambda x:(-x['mean_conditional'],x['candidate']))
+                ranked=[x['candidate'] for x in recommendations]
+                examples.append(dict(r,formula_names=herbs[r['composition_id']]['formula_names'],
+                    original_target_rank=ranked.index(target)+1 if target in ranked else 'unseen',
+                    original_top10='|'.join(ranked[:10]),
+                    selection='First two composition IDs per success/failure within each of the top three Conditional gain herbs'))
+    if examples: write_csv(out/'herbal_example_cases.csv',tuple(examples[0]),examples)
+    label_font=structure_font()
+    with mpl.rc_context({'font.family':'sans-serif','font.sans-serif':['Arial','DejaVu Sans'],
+                         'font.size':9,'axes.spines.top':False,'axes.spines.right':False,
+                         'svg.fonttype':'none','svg.hashsalt':'HerbalFormulaCompletion'}):
+        fig,axes=plt.subplots(1,2,figsize=(9,3.9),sharey=True)
+        for ax,method,title in zip(axes,('mean_conditional','mean_jaccard'),('A  Mean conditional probability','B  Mean pairwise Jaccard')):
+            rows=[r for r in eligible if r['method']==method]
+            x=[int(r['test_cases']) for r in rows]
+            ax.scatter(x,[100*float(r['randomized_minus_popularity']) for r in rows],s=12,color='#bdbdbd',alpha=.65,label='Randomized training data')
+            ax.scatter(x,[100*float(r['original_minus_popularity']) for r in rows],s=12,color='#222222',alpha=.6,label='Original training data')
+            ax.axhline(0,color='#777777',linewidth=.6,linestyle='--')
+            ax.set_xscale('log');ax.set_xlabel('Unique compositions containing the herb')
+            ax.set_title(title,loc='left');ax.set_ylim(-35,112);ax.set_yticks([-25,0,25,50,75,100])
+            marked=sorted(rows,key=lambda r:(-float(r['original_minus_popularity']),r['ingredient']))[:3]
+            for r in marked:
+                ax.annotate(r['ingredient'],(int(r['test_cases']),100*float(r['original_minus_popularity'])),xytext=(5,4),textcoords='offset points',fontsize=7,fontfamily=label_font)
+        axes[0].set_ylabel('Hit@10 difference from Popularity (pp)')
+        axes[0].legend(frameon=False,fontsize=8,loc='lower left')
+        fig.tight_layout();structure_save(fig,figures,'Figure8_herb_specific_prediction')
+    (figures/'Figure8_caption.txt').write_text('Fig. 8. Herb-specific improvement over Popularity. Each point represents one herb occurring in at least 10 unique herbal compositions. The horizontal axis shows its number of eligible compositions, not source-record multiplicity. The vertical axis is the target-specific Hit@10 difference from Popularity, averaged across all held-out cases for that herb. Black points use original training data; gray points average randomized-training runs. These target-specific summaries give equal weight to cases for a given herb and differ from the composition-macro aggregation in Fig. 7. Points and selected examples are descriptive, with no per-herb significance claim.\n')
+
+
+def evaluate_predictive_null(work_dir, workers=2, draws=20, trades_per_row=50):
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    work_dir = Path(work_dir); out = work_dir/'predictive_null'; out.mkdir(parents=True, exist_ok=True)
+    herbs = read_rows(work_dir/'herbal/unique_compositions.csv')
+    members = read_rows(work_dir/'matching/membership.csv')
+    wanted = {r['composition_id'] for r in members}
+    with (work_dir/'food/unique_compositions.csv').open(encoding='utf-8-sig',newline='') as f:
+        food = {r['composition_id']: r for r in csv.DictReader(f) if r['composition_id'] in wanted}
+    cohorts = defaultdict(list)
+    for r in members: cohorts[int(r['replicate'])].append(food[r['composition_id']])
+    assert set(cohorts)==set(range(1,101))
+    hashes = {}
+    for name in ('herbal/unique_compositions.csv','food/unique_compositions.csv','matching/membership.csv'):
+        with (work_dir/name).open('rb') as f: hashes[name]=hashlib.file_digest(f,'sha256').hexdigest()
+    metadata = {'status':'running','draws':draws,'trades_per_row':trades_per_row,'seed':20261001,
+                'fold_seed':20260812,'input_hashes':hashes,'algorithm_sha256':predictive_null_code_hash(),
+                'scope':'Descriptive training-only randomization ablation, not a clinical validation or a causal test.',
+                'weighted_margin':'Expand training source multiplicities before shuffling; source-row lengths and weighted ingredient counts fixed.',
+                'held_fixed':'Original folds, observed test compositions, training vocabulary, weighted ingredient counts, N-1 contexts, Top-10 tie rule.',
+                'changed':'Training co-occurrences and source composition identities; unique-row count need not be preserved.',
+                'duplicates':'Randomized duplicate rows retained; chance matches with fixed test compositions audited, not rejected.',
+                'aggregation':'Mean within composition, then equal composition weight. Food summaries first average draws within each sample.',
+                'randomization_uncertainty':'Independent seeds with a fresh start from observed training data and finite trades; no claim of exact uniform independent draws.',
+                'inference':f'{draws} runs are exploratory stability repeats, not biological replicates. No Monte Carlo p-values or causal attribution are reported.'}
+    (out/'metadata.json').write_text(json.dumps(metadata,indent=2)+'\n')
+    def task(domain,rep,rows,field,folder,trades):
+        return (domain,rep,rows,field,folder,draws,trades,20261001,work_dir/f'evaluation/cohorts/{domain}_{rep:03d}')
+    print('Training-only randomization: herbal cohort',flush=True)
+    results = predictive_null_cohort(task('herbal',0,herbs,'herbs',out/'cohorts/herbal_000',trades_per_row))
+    tasks = [task('food',rep,rows,'ingredients',out/f'cohorts/food_{rep:03d}',trades_per_row) for rep,rows in sorted(cohorts.items())]
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(predictive_null_cohort,t) for t in tasks]
+        for done,future in enumerate(as_completed(futures),1):
+            results.extend(future.result())
+            if done==1 or done%10==0: print(f'Training-only randomized food cohorts: {done}/100',flush=True)
+    print('Longer-randomization sensitivity: herbal and food sample 1',flush=True)
+    sensitivity=[]
+    for domain,rep,rows,field in [('herbal',0,herbs,'herbs'),('food',1,cohorts[1],'ingredients')]:
+        sensitivity.extend(predictive_null_cohort(task(domain,rep,rows,field,out/f'sensitivity/{domain}_{rep:03d}',trades_per_row*2)))
+    results.sort(key=lambda r:(r['domain'],int(r['replicate']),int(r['draw']),r['method']))
+    grouped=defaultdict(list)
+    for r in results: grouped[r['domain'],int(r['replicate']),r['method']].append(r)
+    sample=[]
+    for (domain,rep,method),values in sorted(grouped.items()):
+        a=np.array([float(r['randomized']) for r in values]);observed=float(values[0]['observed'])
+        sample.append({'domain':domain,'replicate':rep,'method':method,'observed':observed,
+                       'randomized_mean':float(a.mean()),'randomized_sd':float(a.std(ddof=1)),
+                       'randomized_min':float(a.min()),'randomized_max':float(a.max()),
+                       'difference':observed-float(a.mean())})
+    summary=[]
+    for domain in ('herbal','food'):
+        for method in EVALUATION_MODELS:
+            values=[r for r in sample if r['domain']==domain and r['method']==method]
+            summary.append({'domain':domain,'method':method,'cohorts':len(values),'draws_per_cohort':draws,
+                'observed':float(np.mean([r['observed'] for r in values])),
+                'randomized_mean':float(np.mean([r['randomized_mean'] for r in values])),
+                'difference':float(np.mean([r['difference'] for r in values])),
+                'sample_difference_p2_5':float(np.percentile([r['difference'] for r in values],2.5)),
+                'sample_difference_p97_5':float(np.percentile([r['difference'] for r in values],97.5))})
+    stability=[]
+    for domain,rep in [('herbal',0),('food',1)]:
+        for method in EVALUATION_MODELS:
+            short=next(r for r in sample if r['domain']==domain and r['replicate']==rep and r['method']==method)
+            long=np.array([float(r['randomized']) for r in sensitivity if r['domain']==domain and r['method']==method])
+            stability.append({'domain':domain,'replicate':rep,'method':method,'primary_trades_per_row':trades_per_row,
+                              'longer_trades_per_row':2*trades_per_row,'primary_randomized_mean':short['randomized_mean'],
+                              'longer_randomized_mean':float(long.mean()),'longer_minus_primary':float(long.mean()-short['randomized_mean'])})
+    for name,values in [('draw_results.csv',results),('sample_results.csv',sample),('summary.csv',summary),('sensitivity_summary.csv',stability)]:
+        write_csv(out/name,tuple(values[0]),values)
+    metadata.update(status='complete',primary_cohorts=101,sensitivity_cohorts=2,
+                    randomized_training_matrices=103*5*draws,
+                    baseline_composition_checks=103*len(herbs)*3)
+    (out/'metadata.json').write_text(json.dumps(metadata,indent=2)+'\n')
+    make_predictive_null_figure(out,ROOT/'figures')
+    make_predictive_ingredient_outputs(work_dir,ROOT/'figures')
+    print('Complete: work/predictive_null and Figure7_training_randomization',flush=True)
+    return summary
+
+
 def heading(text):
     print(f"\n{text}\n{'-' * len(text)}", flush=True)
 
 
-def main(workers=2, null_draws=1999):
+def main(workers=2, null_draws=1999, predictive_draws=20):
     herbal_dir = ROOT / "data/herbal"
     herbal_files = sorted(herbal_dir.glob("*.csv"))
     if len(herbal_files) != 5:
@@ -1705,24 +2095,31 @@ def main(workers=2, null_draws=1999):
     heading("Full recommendation evaluation")
     evaluate_all(ROOT / "work", workers=workers)
     analyze_structure(ROOT / "work", workers=workers, draws=null_draws)
+    evaluate_predictive_null(ROOT / "work", workers=workers, draws=predictive_draws)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--evaluate-only", action="store_true")
     parser.add_argument("--structure-only", action="store_true")
+    parser.add_argument("--predictive-null-only", action="store_true")
+    parser.add_argument("--predictive-draws", type=int, default=20)
     parser.add_argument("--null-draws", type=int, default=1999)
     parser.add_argument("--workers", type=int, default=2)
     args = parser.parse_args()
-    if args.evaluate_only and args.structure_only:
-        parser.error("Choose only one of --evaluate-only and --structure-only")
+    if sum((args.evaluate_only, args.structure_only, args.predictive_null_only)) > 1:
+        parser.error("Choose only one analysis-only mode")
+    if args.predictive_draws < 2:
+        parser.error("--predictive-draws must be at least 2")
     if args.workers < 1:
         parser.error("--workers must be at least 1")
     if args.null_draws < 99:
         parser.error("--null-draws must be at least 99")
-    if args.structure_only:
+    if args.predictive_null_only:
+        evaluate_predictive_null(ROOT / "work", workers=args.workers, draws=args.predictive_draws)
+    elif args.structure_only:
         analyze_structure(ROOT / "work", workers=args.workers, draws=args.null_draws)
     elif args.evaluate_only:
         evaluate_all(ROOT / "work", workers=args.workers)
     else:
-        main(workers=args.workers, null_draws=args.null_draws)
+        main(workers=args.workers, null_draws=args.null_draws, predictive_draws=args.predictive_draws)
