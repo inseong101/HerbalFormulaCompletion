@@ -959,23 +959,21 @@ def make_evaluation_figure(summary, output_dir):
     food = [100 * float(r["food_mean"]) for r in rows]
     errors = [[v - 100 * float(r["food_p2_5"]) for v,r in zip(food,rows)],
               [100 * float(r["food_p97_5"]) - v for v,r in zip(food,rows)]]
-    with mpl.rc_context({"font.family": "sans-serif", "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+    with mpl.rc_context({"font.family": "sans-serif", "font.sans-serif": ["DejaVu Sans"],
                          "font.size": 9, "axes.linewidth": .8, "axes.spines.top": False,
                          "axes.spines.right": False, "svg.fonttype": "none", "svg.hashsalt": "HerbalFormulaCompletion"}):
-        fig, ax = plt.subplots(figsize=(7.2, 3.9))
+        fig, ax = plt.subplots(figsize=(7.2, 3.6))
         width = .32
         ax.bar([i-width/2 for i in range(3)], herbal, width, color="#222222", edgecolor="#222222", linewidth=.5, label="Herbal")
         ax.bar([i+width/2 for i in range(3)], food, width, color="#bdbdbd", edgecolor="#555555", linewidth=.5,
                label="Food", yerr=errors, error_kw={"elinewidth": .7, "capsize": 3, "capthick": .7, "ecolor": "#555555"})
-        ax.set_xticks(range(3), ["Popularity", "Mean conditional probability", "Mean pairwise Jaccard"])
+        ax.set_xticks(range(3), ["Popularity", "Mean conditional\nprobability", "Mean pairwise\nJaccard"])
         ax.set_ylabel("Hit@10 (%)")
         ax.set_ylim(0, 65)
         ax.set_yticks(range(0, 61, 10))
         ax.legend(frameon=False, loc="upper left")
-        for ext in ("png", "svg", "pdf"):
-            metadata = {"Date": None} if ext == "svg" else ({"CreationDate": None, "ModDate": None} if ext == "pdf" else None)
-            fig.savefig(output_dir / f"Figure2_recommendation_performance.{ext}", dpi=600, bbox_inches="tight", facecolor="white", metadata=metadata)
-        plt.close(fig)
+        fig.tight_layout()
+        structure_save(fig, output_dir, "Figure2_recommendation_performance")
     caption = ("Fig. 2. Ingredient recommendation performance in herbal formulas and matched food samples. Each ingredient in every composition was withheld once, "
                "with all remaining ingredients provided as input. Hit@10 was averaged first within each composition and then equally across all 2,009 compositions. "
                "Black bars show herbal performance; gray bars show mean performance across 100 matched food samples. "
@@ -1006,7 +1004,7 @@ def make_figure1(herbal_counts, food_counts):
 
     mpl.rcParams.update({
         "font.family": "sans-serif",
-        "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+        "font.sans-serif": ["DejaVu Sans"],
         "font.size": 9,
         "axes.linewidth": 0.8,
         "axes.spines.top": False,
@@ -1014,17 +1012,17 @@ def make_figure1(herbal_counts, food_counts):
         "svg.hashsalt": "HerbalFormulaCompletion",
         "svg.fonttype": "none",
     })
-    fig, ax = plt.subplots(figsize=(7.2, 3.9))
+    fig, ax = plt.subplots(figsize=(7.2, 3.6))
     width = 0.38
     ax.bar(
         [size - width / 2 for size in sizes], food_percent, width,
         color="#bdbdbd", edgecolor="#555555", linewidth=0.5,
-        label=f"Food before matching (n={food_total:,})",
+        label="Food",
     )
     ax.bar(
         [size + width / 2 for size in sizes], herbal_percent, width,
         color="#222222", edgecolor="#222222", linewidth=0.5,
-        label=f"Herbal (n={herbal_total:,})",
+        label="Herbal",
     )
     ax.set_xlabel("Number of ingredients")
     ax.set_ylabel("Compositions (%)")
@@ -1033,17 +1031,10 @@ def make_figure1(herbal_counts, food_counts):
 
     output = ROOT / "figures"
     output.mkdir(exist_ok=True)
-    svg = output / "Figure1_dataset_matching.svg"
-    png = output / "Figure1_dataset_matching.png"
-    fig.savefig(svg, bbox_inches="tight", facecolor="white", metadata={"Date": None})
-    clean = "\n".join(
-        line.rstrip() for line in svg.read_text(encoding="utf-8").splitlines()
-    )
-    svg.write_text(clean + "\n", encoding="utf-8")
-    fig.savefig(png, dpi=600, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    print("Saved:", svg.relative_to(ROOT))
-    print("Saved:", png.relative_to(ROOT))
+    fig.tight_layout()
+    structure_save(fig, output, "Figure1_dataset_matching")
+    print("Saved: figures/Figure1_dataset_matching (EPS, TIFF, PDF, SVG, PNG)")
+
 
 
 import numpy as np
@@ -1123,26 +1114,40 @@ def structure_prepare(rows, field, weighted=False):
 
 
 
-def structure_font():
-    from matplotlib import font_manager
-    for path in font_manager.findSystemFonts():
-        if 'Nanum' in path:
-            try: font_manager.fontManager.addfont(path)
-            except Exception: pass
-    for name in ('AppleGothic','NanumGothic','Noto Sans CJK KR','Malgun Gothic'):
-        try:
-            font_manager.findfont(name,fallback_to_default=False)
-            return name
-        except ValueError: pass
-    raise RuntimeError('A Korean font is required: install fonts-nanum in Colab/Linux.')
+# Display-only Korean-to-Romanized labels; source IDs and analysis are unchanged.
+HERB_DISPLAY_NAMES = {
+    '가자':'Gaja', '검인':'Geomin', '관동화':'Gwandonghwa', '구맥':'Gumaek',
+    '귀판':'Gwipan', '금은화':'Geumeunhwa', '녹용':'Nogyong', '당귀미':'Danggwi-mi',
+    '도인':'Doin', '두중':'Dujung', '맥아':'Maega', '모려':'Moryeo', '목통':'Moktong',
+    '백자인':'Baekjain', '백편두':'Baekpyeondu', '보골지':'Bogolji', '복신':'Boksin',
+    '사향':'Sahyang', '산사':'Sansa', '산사육':'Sansayuk', '산조인':'Sanjoin',
+    '삼릉':'Samneung', '석곡':'Seokgok', '아출':'Achul', '연교':'Yeongyo',
+    '연자육':'Yeonjayuk', '용골':'Yonggol', '우방자':'Ubangja', '우슬':'Useul',
+    '원지':'Wonji', '육두구':'Yukdugu', '육종용':'Yukjongyong', '의이인':'Uiin',
+    '자완':'Jawan', '주사':'Jusa', '죽엽':'Jugyeop', '차전자':'Chajeonja',
+    '토사자':'Tosaja', '파극천':'Pageukcheon', '홍화':'Honghwa', '회향':'Hoehyang',
+}
 
 
-def structure_save(fig,out,stem):
-    for ext in ('png','svg','pdf'):
-        metadata={'Date':None} if ext=='svg' else ({'CreationDate':None,'ModDate':None} if ext=='pdf' else None)
-        fig.savefig(out/f'{stem}.{ext}',dpi=400,bbox_inches='tight',facecolor='white',metadata=metadata)
+def ingredient_display_name(name):
+    if any('가' <= char <= '힣' for char in name):
+        return HERB_DISPLAY_NAMES[name]
+    return name.replace('_', '\n')
+
+
+def structure_save(fig, out, stem):
+    """IMR submission: embedded-font EPS and 1000-dpi TIFF; other files are previews."""
+    out = Path(out); out.mkdir(parents=True, exist_ok=True)
+    with mpl.rc_context({'pdf.fonttype': 42, 'ps.fonttype': 42}):
+        for ext in ('eps', 'tiff', 'pdf', 'svg', 'png'):
+            metadata = {'Date': None} if ext == 'svg' else ({'CreationDate': None, 'ModDate': None} if ext == 'pdf' else None)
+            options = {'pil_kwargs': {'compression': 'tiff_lzw'}} if ext == 'tiff' else {}
+            fig.savefig(out / f'{stem}.{ext}', dpi=1000 if ext == 'tiff' else 300,
+                        bbox_inches='tight', pad_inches=.06, facecolor='white', metadata=metadata, **options)
     plt.close(fig)
-    path=out/f'{stem}.svg';path.write_text('\n'.join(x.rstrip() for x in path.read_text().splitlines())+'\n')
+    path = out / f'{stem}.svg'
+    path.write_text('\n'.join(x.rstrip() for x in path.read_text().splitlines()) + '\n')
+
 
 
 
@@ -1356,17 +1361,17 @@ def make_frequency_figure(work_dir, figures):
             'source_records':total,'prevalence':counts[x]/total}
             for i,x in enumerate(sorted(counts,key=lambda x:(-counts[x],x)),1))
     write_csv(out/'ingredient_frequencies.csv',tuple(frequencies[0]),frequencies)
-    with mpl.rc_context({'font.family':'sans-serif','font.sans-serif':['Arial','DejaVu Sans'],
+    with mpl.rc_context({'font.family':'sans-serif','font.sans-serif':['DejaVu Sans'],
             'font.size':9,'axes.spines.top':False,'axes.spines.right':False,
             'svg.fonttype':'none','svg.hashsalt':'HFC-unified'}):
-        fig,axes=plt.subplots(1,2,figsize=(9,3.8),sharey=True)
-        for ax,domain,title in zip(axes,('herbal','food'),('A  Herbal','B  Food')):
+        fig,axes=plt.subplots(1,2,figsize=(7.2,3.1),sharey=True)
+        for ax,domain,title in zip(axes,('herbal','food'),('Herbal','Food')):
             rows=[r for r in frequencies if r['domain']==domain]
             ax.plot([r['rank'] for r in rows],[100*r['prevalence'] for r in rows],color='#333333',lw=1.2)
             ax.set_xlim(0,1500);ax.set_ylim(0,60);ax.set_xlabel('Ingredient frequency rank');ax.set_title(title,loc='left')
-        axes[0].set_ylabel('Source records containing ingredient (%)')
+        axes[0].set_ylabel('Source records (%)')
         fig.tight_layout();structure_save(fig,figures,'Figure3_ingredient_frequency')
-    caption3=('Fig. 3. Ingredient rank–frequency distributions in herbal formulas and food recipes. A: herbal; B: food. '
+    caption3=('Fig. 3. Ingredient rank–frequency distributions in herbal formulas and food recipes. Left: herbal; right: food. '
         'Each domain is shown by one line retaining source-record multiplicities. '
         'The denominator is 2,992 herbal source records or 921,927 food source records, respectively. '
         'The full food source pool is used here, not the matched samples.')
@@ -1535,24 +1540,21 @@ def make_predictive_null_figure(output, figures):
     output, figures = Path(output), Path(figures)
     summary = read_rows(output / 'summary.csv')
     figures.mkdir(parents=True, exist_ok=True)
-    with mpl.rc_context({'font.family': 'sans-serif', 'font.sans-serif': ['Arial','DejaVu Sans'],
+    with mpl.rc_context({'font.family': 'sans-serif', 'font.sans-serif': ['DejaVu Sans'],
                          'font.size': 9, 'axes.linewidth': .8, 'axes.spines.top': False,
                          'axes.spines.right': False, 'svg.fonttype': 'none',
                          'svg.hashsalt': 'HerbalFormulaCompletion'}):
-        fig, axes = plt.subplots(1, 2, figsize=(9, 3.9), sharey=True)
-        for ax, domain, title in zip(axes, ('herbal', 'food'), ('A  Herbal', 'B  Food')):
+        fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.4), sharey=True)
+        for ax, domain, title in zip(axes, ('herbal', 'food'), ('Herbal', 'Food')):
             selected = [next(r for r in summary if r['domain']==domain and r['method']==m) for m in EVALUATION_MODELS]
             original = [100*float(r['observed']) for r in selected]
             shuffled = [100*float(r['randomized_mean']) for r in selected]
             x = np.arange(3); width=.32
-            ax.bar(x-width/2, original, width, color='#222222', label='Original training data')
+            ax.bar(x-width/2, original, width, color='#222222', label='Original')
             ax.bar(x+width/2, shuffled, width, color='#bdbdbd', edgecolor='#555555', linewidth=.5,
-                   label='Randomized training data')
-            for i,r in enumerate(selected):
-                ax.text(i, max(original[i],shuffled[i])+1.5,
-                        f"{100*float(r['difference']):+.1f} pp", ha='center', fontsize=8)
+                   label='Randomized')
             ax.set_title(title, loc='left')
-            ax.set_xticks(x, ['Popularity','Mean conditional\nprobability','Mean pairwise\nJaccard'])
+            ax.set_xticks(x, ['Popularity','Mean conditional\nprobability','Mean pairwise\nJaccard'], fontsize=7.5)
             ax.set_ylim(0,65);ax.set_yticks(np.arange(0,61,10))
         axes[0].set_ylabel('Hit@10 (%)')
         axes[0].legend(frameon=False, loc='upper left', fontsize=8)
@@ -1566,7 +1568,6 @@ def make_predictive_null_figure(output, figures):
         f'Gray bars average {draws} independently seeded finite randomization runs per cohort; '
         'food bars additionally average the 100 matched food samples. '
         'Performance was averaged within each composition and then equally across compositions. '
-        'Labels show original minus randomized performance in percentage points (pp). '
         'Popularity predictions were identical in every original and randomized test case. '
         'This is a descriptive training-data ablation; the repeated runs are not independent datasets or a confidence interval. '
         'All run-level values and finite-randomization sensitivity results are provided with the code.')
@@ -1689,8 +1690,8 @@ def relationship_positions(edges, wide=False):
             radius=2.45 if full_width else 1.05
             positions[name]=np.array([center+radius*xy[0],-(heights[col]+height/2)+.35*height*xy[1]])
         # Repel overlapping label rectangles within each displayed component.
-        half_width={x:.035*max(sum(2 if ord(c)>127 else 1 for c in part) for part in x.split('_'))+.10 for x in names}
-        half_height={x:.12+.075*x.count('_') for x in names}
+        half_width={x:.045*max(len(part) for part in ingredient_display_name(x).split('\n'))+.10 for x in names}
+        half_height={x:.22+.10*x.count('_') for x in names}
         for _ in range(300):
             moved=False
             for i,a in enumerate(names):
@@ -1814,28 +1815,28 @@ def make_relationship_atlas(work_dir, figures):
     for filename,rows in [('ranked_pairs.csv',all_rows),('displayed_pairs.csv',displayed['herbal']+displayed['food']),
                           ('source_examples.csv',examples),('food_pair_stability.csv',stability)]:
         write_csv(out/filename,tuple(rows[0]),rows)
-    positions=[];font=structure_font();max_ratio=max(r['ratio'] for rows in displayed.values() for r in rows)
-    with mpl.rc_context({'font.family':'sans-serif','font.sans-serif':['Arial','DejaVu Sans'],
-            'font.size':10,'svg.fonttype':'none','svg.hashsalt':'HFC-ratio-atlas'}):
-        fig,axes=plt.subplots(1,2,figsize=(17,11))
-        for ax,domain,title in zip(axes,('herbal','food'),('A  Herbal','B  Food')):
+    positions=[];max_ratio=max(r['ratio'] for rows in displayed.values() for r in rows)
+    with mpl.rc_context({'font.family':'sans-serif','font.sans-serif':['DejaVu Sans'],
+            'font.size':8,'svg.fonttype':'none','svg.hashsalt':'HFC-ratio-atlas'}):
+        fig,axes=plt.subplots(2,1,figsize=(7.2,10.2))
+        for ax,domain,title in zip(axes,('herbal','food'),('Herbal','Food')):
             rows=displayed[domain];graph,pos,height=relationship_positions(rows, wide=domain=='food')
             freq=Counter(x for r in cohorts[domain] for x in r['herbs' if domain=='herbal' else 'ingredients'].split('|'))
             ratio_lookup={frozenset((r['ingredient_a'],r['ingredient_b'])):r['ratio'] for r in rows}
             nx.draw_networkx_edges(graph,pos,ax=ax,edge_color='#686868',width=[.5+3*ratio_lookup[frozenset((a,b))]/max_ratio for a,b in graph.edges])
-            nx.draw_networkx_nodes(graph,pos,ax=ax,node_size=55,node_color='white',edgecolors='#444444',linewidths=.7)
-            labels={x:x.replace('_','\n') for x in graph}
-            nx.draw_networkx_labels(graph,pos,labels=labels,ax=ax,font_family=font if domain=='herbal' else 'DejaVu Sans',font_size=10,
-                                    bbox={'facecolor':'white','edgecolor':'none','pad':.6,'alpha':.95})
-            ax.set_xlim(-.25,6.5);ax.set_ylim(-height-.15,.15);ax.axis('off');ax.set_title(title,loc='left',fontsize=13)
+            nx.draw_networkx_nodes(graph,pos,ax=ax,node_size=25,node_color='white',edgecolors='#444444',linewidths=.7)
+            labels={x:ingredient_display_name(x) for x in graph}
+            nx.draw_networkx_labels(graph,pos,labels=labels,ax=ax,font_family='DejaVu Sans',font_size=8,
+                                    bbox={'facecolor':'white','edgecolor':'none','pad':.35})
+            ax.set_xlim(-.25,6.5);ax.set_ylim(-height-.15,.15);ax.axis('off');ax.set_title(title,loc='left',fontsize=10)
             positions.extend({'domain':domain,'ingredient':x,'x':float(v[0]),'y':float(v[1]),'unique_occurrences':freq[x]} for x,v in sorted(pos.items()))
         from matplotlib.lines import Line2D
         fig.legend(handles=[Line2D([0],[0],color='#686868',lw=.5+3*r/max_ratio,label=f'{r:g}×') for r in (5,20,40)],
-                   title='Observed / randomized mean',loc='lower center',ncol=3,frameon=False,bbox_to_anchor=(.5,-.005),fontsize=9,title_fontsize=9)
+                   title='Co-occurrence ratio',loc='lower center',ncol=3,frameon=False,bbox_to_anchor=(.5,-.005),fontsize=8,title_fontsize=8)
         fig.tight_layout(rect=[0,.065,1,1]);structure_save(fig,figures,'Figure5_ingredient_relationships')
     write_csv(out/'network_positions.csv',tuple(positions[0]),positions)
     caption=('Fig. 5. Ingredient relationships relative to frequency-preserving randomization. Counts use the same training data as Fig. 4. '
-        'A: herbal; B: all 100 matched food samples pooled. Source-record weights are retained. '
+        'Upper: herbal; lower: all 100 matched food samples pooled. Herb names are Romanized Korean names. Source-record weights are retained. '
         'For each pair, original counts are averaged over five training folds; randomized counts are averaged over the same folds and all randomization runs. '
         'For food, the numerator and denominator are additionally averaged across all 100 samples, including samples with zero observed co-occurrence; sample ratios are not averaged. Line width represents the ratio on a common scale. '
         'Each panel shows the 30 largest finite ratios above one among pairs occurring in at least 10 unique compositions per sample on average (10 for herbal; summed sample support of at least 1,000 for food). Repeated compositions across food samples are retained as sampled memberships, not independent records. '
