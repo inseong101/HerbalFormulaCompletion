@@ -1735,7 +1735,7 @@ def evaluate_predictive_null(work_dir, workers=2, draws=20, trades_per_row=50):
     return summary
 
 
-def relationship_positions(edges):
+def relationship_positions(edges, wide=False):
     """Pack displayed connected components for legibility; no community inference."""
     import networkx as nx
     graph=nx.Graph()
@@ -1744,7 +1744,9 @@ def relationship_positions(edges):
     positions={};heights=[0.,0.]
     for component in components:
         names=sorted(component);col=int(heights[1]<heights[0]);n=len(names)
-        height=.85 if n==2 else max(1.5,.55*math.sqrt(n)+.7)
+        full_width=wide and n>=7
+        if full_width:heights=[max(heights)]*2;col=0
+        height=3.5 if full_width else (.85 if n==2 else max(1.5,.55*math.sqrt(n)+.7))
         if n==2:
             local={names[0]:np.array([-.65,0]),names[1]:np.array([.65,0])}
         else:
@@ -1752,8 +1754,21 @@ def relationship_positions(edges):
             sub.add_edges_from(sorted((min(a,b),max(a,b)) for a,b in graph.edges if a in component and b in component))
             local=nx.spring_layout(sub,seed=20260928,weight=None,k=1.4/math.sqrt(n),iterations=1000)
             for name in names:local[name]=np.array([float(local[name][0]),float(local[name][1])])
+        if full_width:
+            # Fill both dimensions of the allotted space instead of retaining a narrow spring layout.
+            xy=np.array([local[x] for x in names]);low=xy.min(axis=0);span=np.maximum(xy.max(axis=0)-low,1e-8)
+            local={x:2*(local[x]-low)/span-1 for x in names}
+            # Presentation-only anchors separate the two spice triangles and their branches.
+            anchors={'turmeric':(-.15,.45),'coriander':(.7,.15),'cumin':(-.15,-.2),'chili':(.85,-.55),
+                     'ginger':(-.55,.65),'soy_sauce':(-.85,.85),'cornstarch':(-1,1),
+                     'cilantro':(-.45,-.6),'lime':(-1,-.8),'avocado':(-.7,-1),'jalapeno':(.25,-1)}
+            if {'turmeric','coriander','cumin','chili'} <= component:
+                for name in names:
+                    if name in anchors:local[name]=np.array(anchors[name])
         for name,xy in local.items():
-            positions[name]=np.array([col*3.2+1.45+1.05*xy[0],-(heights[col]+height/2)+.35*height*xy[1]])
+            center=3.1 if full_width else col*3.2+1.45
+            radius=2.45 if full_width else 1.05
+            positions[name]=np.array([center+radius*xy[0],-(heights[col]+height/2)+.35*height*xy[1]])
         # Repel overlapping label rectangles within each displayed component.
         half_width={x:.035*max(sum(2 if ord(c)>127 else 1 for c in part) for part in x.split('_'))+.10 for x in names}
         half_height={x:.12+.075*x.count('_') for x in names}
@@ -1770,7 +1785,8 @@ def relationship_positions(edges):
                         sign=1 if delta[axis]>=0 else -1
                         positions[a][axis]-=shift*sign;positions[b][axis]+=shift*sign;moved=True
             if not moved:break
-        heights[col]+=height+.20
+        heights[col]+=height+.35
+        if full_width:heights[1]=heights[0]
     return graph,positions,max(heights)
 
 
@@ -1882,15 +1898,15 @@ def make_relationship_atlas(work_dir, figures):
     positions=[];font=structure_font();max_ratio=max(r['ratio'] for rows in displayed.values() for r in rows)
     with mpl.rc_context({'font.family':'sans-serif','font.sans-serif':['Arial','DejaVu Sans'],
             'font.size':10,'svg.fonttype':'none','svg.hashsalt':'HFC-ratio-atlas'}):
-        fig,axes=plt.subplots(1,2,figsize=(13,9))
+        fig,axes=plt.subplots(1,2,figsize=(17,11))
         for ax,domain,title in zip(axes,('herbal','food'),('A  Herbal','B  Food')):
-            rows=displayed[domain];graph,pos,height=relationship_positions(rows)
+            rows=displayed[domain];graph,pos,height=relationship_positions(rows, wide=domain=='food')
             freq=Counter(x for r in cohorts[domain] for x in r['herbs' if domain=='herbal' else 'ingredients'].split('|'))
             ratio_lookup={frozenset((r['ingredient_a'],r['ingredient_b'])):r['ratio'] for r in rows}
             nx.draw_networkx_edges(graph,pos,ax=ax,edge_color='#686868',width=[.5+3*ratio_lookup[frozenset((a,b))]/max_ratio for a,b in graph.edges])
             nx.draw_networkx_nodes(graph,pos,ax=ax,node_size=55,node_color='white',edgecolors='#444444',linewidths=.7)
             labels={x:x.replace('_','\n') for x in graph}
-            nx.draw_networkx_labels(graph,pos,labels=labels,ax=ax,font_family=font if domain=='herbal' else 'DejaVu Sans',font_size=8.5,
+            nx.draw_networkx_labels(graph,pos,labels=labels,ax=ax,font_family=font if domain=='herbal' else 'DejaVu Sans',font_size=10,
                                     bbox={'facecolor':'white','edgecolor':'none','pad':.6,'alpha':.95})
             ax.set_xlim(-.25,6.5);ax.set_ylim(-height-.15,.15);ax.axis('off');ax.set_title(title,loc='left',fontsize=13)
             positions.extend({'domain':domain,'ingredient':x,'x':float(v[0]),'y':float(v[1]),'unique_occurrences':freq[x]} for x,v in sorted(pos.items()))
