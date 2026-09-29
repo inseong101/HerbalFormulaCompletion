@@ -1015,19 +1015,19 @@ def make_figure1(herbal_counts, food_counts):
     fig, ax = plt.subplots(figsize=(7.2, 3.6))
     width = 0.38
     ax.bar(
-        [size - width / 2 for size in sizes], food_percent, width,
+        [size + width / 2 for size in sizes], food_percent, width,
         color="#bdbdbd", edgecolor="#555555", linewidth=0.5,
         label="Food",
     )
     ax.bar(
-        [size + width / 2 for size in sizes], herbal_percent, width,
+        [size - width / 2 for size in sizes], herbal_percent, width,
         color="#222222", edgecolor="#222222", linewidth=0.5,
         label="Herbal",
     )
     ax.set_xlabel("Number of ingredients")
     ax.set_ylabel("Compositions (%)")
     ax.set_xticks(sizes)
-    ax.legend(frameon=False)
+    ax.legend(*[list(reversed(items)) for items in ax.get_legend_handles_labels()], frameon=False)
 
     output = ROOT / "figures"
     output.mkdir(exist_ok=True)
@@ -1114,25 +1114,17 @@ def structure_prepare(rows, field, weighted=False):
 
 
 
-# Display-only Korean-to-Romanized labels; source IDs and analysis are unchanged.
-HERB_DISPLAY_NAMES = {
-    '가자':'Gaja', '검인':'Geomin', '관동화':'Gwandonghwa', '구맥':'Gumaek',
-    '귀판':'Gwipan', '금은화':'Geumeunhwa', '녹용':'Nogyong', '당귀미':'Danggwi-mi',
-    '도인':'Doin', '두중':'Dujung', '맥아':'Maega', '모려':'Moryeo', '목통':'Moktong',
-    '백자인':'Baekjain', '백편두':'Baekpyeondu', '보골지':'Bogolji', '복신':'Boksin',
-    '사향':'Sahyang', '산사':'Sansa', '산사육':'Sansayuk', '산조인':'Sanjoin',
-    '삼릉':'Samneung', '석곡':'Seokgok', '아출':'Achul', '연교':'Yeongyo',
-    '연자육':'Yeonjayuk', '용골':'Yonggol', '우방자':'Ubangja', '우슬':'Useul',
-    '원지':'Wonji', '육두구':'Yukdugu', '육종용':'Yukjongyong', '의이인':'Uiin',
-    '자완':'Jawan', '주사':'Jusa', '죽엽':'Jugyeop', '차전자':'Chajeonja',
-    '토사자':'Tosaja', '파극천':'Pageukcheon', '홍화':'Honghwa', '회향':'Hoehyang',
-}
+# Display names apply only to manuscript ingredients; statistical identifiers remain unchanged.
+HERB_DISPLAY_NAMES = {row['source_name']: row['display_name']
+                      for row in read_rows(ROOT / 'data/herbal_display_names.csv')}
 
 
-def ingredient_display_name(name):
-    if any('가' <= char <= '힣' for char in name):
-        return HERB_DISPLAY_NAMES[name]
-    return name.replace('_', '\n')
+def ingredient_display_name(name, wrap=False):
+    label = HERB_DISPLAY_NAMES.get(name, name.replace('_', ' '))
+    if wrap:
+        import textwrap
+        return '\n'.join(textwrap.wrap(label, width=19, break_long_words=False, break_on_hyphens=False))
+    return label
 
 
 def structure_save(fig, out, stem):
@@ -1237,55 +1229,6 @@ def food_relationship_candidates(cohorts):
     return sorted(pair for pair,n in counts.items() if n >= 10*len(cohorts))
 
 
-def replay_training_pairs(task):
-    domain,rep,rows,field,output,draws,trades,seed,baseline,pair_keys=task
-    output=Path(output);meta=json.loads((output/'metadata.json').read_text())
-    if meta['status']!='complete' or meta['draws']!=draws or meta['trades_per_row']!=trades or meta['seed']!=seed:
-        raise ValueError('Prediction run settings mismatch')
-    if meta['input_sha256']!=hashlib.sha256(json.dumps(rows,sort_keys=True).encode()).hexdigest():
-        raise ValueError('Prediction input mismatch')
-    keys,support=relationship_pair_candidates(rows,field,pair_keys)
-    old=dict(np.load(output/'training_pair_counts.npz'))
-    old_index={(a,b):i for i,(a,b) in enumerate(zip(old['ingredient_a'],old['ingredient_b']))}
-    shared=[(j,old_index[key]) for j,key in enumerate(keys) if key in old_index]
-    audits=read_rows(output/'fold_audit.csv')
-    before=np.zeros((5,len(keys)),dtype=np.int64);after=np.zeros((5,draws,len(keys)),dtype=np.int64)
-    folds=assign_composition_folds(rows,ingredient_field=field)
-    for f in range(5):
-        train=[r for j,fold in enumerate(folds) if j!=f for r in fold]
-        vocab,matrix,lengths,freq,*_=structure_prepare(train,field,weighted=True)
-        index={v:i for i,v in enumerate(vocab)}
-        a=np.array([index.get(x,-1) for x,y in keys]);b=np.array([index.get(y,-1) for x,y in keys]);present=(a>=0)&(b>=0)
-        counts=predictive_pair_counts(matrix,lengths,len(vocab));before[f,present]=counts[a[present],b[present]]
-        for d in range(draws):
-            draw_seed=seed+rep*100000+f*1000+d
-            assert int(audits[f*draws+d]['seed'])==draw_seed
-            shuffled=predictive_shuffle(matrix,lengths,draw_seed,trades)
-            assert np.array_equal(np.bincount(shuffled[shuffled>=0],minlength=len(vocab)),freq)
-            counts=predictive_pair_counts(shuffled,lengths,len(vocab));after[f,d,present]=counts[a[present],b[present]]
-    for j,k in shared:
-        assert np.array_equal(before[:,j],old['observed'][:,k])
-        assert np.array_equal(after[:,:,j],old['randomized'][:,:,k])
-    save_training_pair_results(output,keys,support,before,after,audits)
-    (output/'pair_replay_audit.json').write_text(json.dumps({'same_prediction_seeds':True,'previous_pairs_exactly_reproduced':len(shared),'global_candidates':len(keys),'includes_zero_and_low_support_samples':True},indent=2)+'\n')
-    return len(shared)
-
-
-def aggregate_food_relationships(work_dir, workers=2):
-    from concurrent.futures import ProcessPoolExecutor
-    work_dir=Path(work_dir);root=work_dir/'predictive_null';meta=json.loads((root/'metadata.json').read_text())
-    members=read_rows(work_dir/'matching/membership.csv');wanted={r['composition_id'] for r in members}
-    food={r['composition_id']:r for r in read_rows(work_dir/'food/unique_compositions.csv') if r['composition_id'] in wanted}
-    cohorts=defaultdict(list)
-    for r in members:cohorts[int(r['replicate'])].append(food[r['composition_id']])
-    keys=food_relationship_candidates(cohorts)
-    tasks=[('food',rep,rows,'ingredients',root/f'cohorts/food_{rep:03d}',meta['draws'],meta['trades_per_row'],meta['seed'],None,keys) for rep,rows in sorted(cohorts.items())]
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        for i,result in enumerate(pool.map(replay_training_pairs,tasks),1):
-            if i%10==0:print(f'Food pair replay: {i}/100',flush=True)
-    return keys
-
-
 def pooled_food_pairs(root):
     groups=defaultdict(list)
     for rep in range(1,101):
@@ -1293,7 +1236,7 @@ def pooled_food_pairs(root):
             groups[r['ingredient_a'],r['ingredient_b']].append(r)
     result=[]
     for (a,b),rows in sorted(groups.items()):
-        if len(rows)!=100:raise ValueError('Run --aggregate-food-only to collect every candidate in all samples')
+        if len(rows)!=100:raise ValueError('Pair counts must cover all 100 samples; rerun the pipeline in a fresh work directory')
         before=sum(r['observed_training_mean'] for r in rows)/100
         after=sum(r['randomized_training_mean'] for r in rows)/100
         result.append({'ingredient_a':a,'ingredient_b':b,
@@ -1365,13 +1308,18 @@ def make_frequency_figure(work_dir, figures):
             'font.size':9,'axes.spines.top':False,'axes.spines.right':False,
             'svg.fonttype':'none','svg.hashsalt':'HFC-unified'}):
         fig,axes=plt.subplots(1,2,figsize=(7.2,3.1),sharey=True)
-        for ax,domain,title in zip(axes,('herbal','food'),('Herbal','Food')):
+        for ax,domain,title in zip(axes,('herbal','food'),('(A) Herbal','(B) Food')):
             rows=[r for r in frequencies if r['domain']==domain]
             ax.plot([r['rank'] for r in rows],[100*r['prevalence'] for r in rows],color='#333333',lw=1.2)
-            ax.set_xlim(0,1500);ax.set_ylim(0,60);ax.set_xlabel('Ingredient frequency rank');ax.set_title(title,loc='left')
+            ax.set_xscale('log'); ax.set_yscale('log')
+            ax.set_xlim(1,2000); ax.set_ylim(.0001,100)
+            ax.set_xticks([1,10,100,1000], ['1','10','100','1000'])
+            ax.set_yticks([.0001,.001,.01,.1,1,10,100], ['0.0001','0.001','0.01','0.1','1','10','100'])
+            ax.minorticks_off()
+            ax.set_xlabel('Ingredient frequency rank'); ax.set_title(title,loc='left')
         axes[0].set_ylabel('Source records (%)')
         fig.tight_layout();structure_save(fig,figures,'Figure3_ingredient_frequency')
-    caption3=('Fig. 3. Ingredient rank–frequency distributions in herbal formulas and food recipes. Left: herbal; right: food. '
+    caption3=('Fig. 3. Ingredient rank–frequency distributions in herbal formulas and food recipes. (A) Herbal formulas. (B) Food recipes. Both axes use logarithmic scales. '
         'Each domain is shown by one line retaining source-record multiplicities. '
         'The denominator is 2,992 herbal source records or 921,927 food source records, respectively. '
         'The full food source pool is used here, not the matched samples.')
@@ -1545,7 +1493,7 @@ def make_predictive_null_figure(output, figures):
                          'axes.spines.right': False, 'svg.fonttype': 'none',
                          'svg.hashsalt': 'HerbalFormulaCompletion'}):
         fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.4), sharey=True)
-        for ax, domain, title in zip(axes, ('herbal', 'food'), ('Herbal', 'Food')):
+        for ax, domain, title in zip(axes, ('herbal', 'food'), ('(A) Herbal', '(B) Food')):
             selected = [next(r for r in summary if r['domain']==domain and r['method']==m) for m in EVALUATION_MODELS]
             original = [100*float(r['observed']) for r in selected]
             shuffled = [100*float(r['randomized_mean']) for r in selected]
@@ -1562,7 +1510,7 @@ def make_predictive_null_figure(output, figures):
         structure_save(fig, figures, 'Figure4_training_randomization')
     draws = int(json.loads((output/'metadata.json').read_text())['draws'])
     caption = ('Fig. 4. Recommendation performance with original and randomized training data. '
-        'Observed test compositions, five-fold assignments, and all leave-one-ingredient-out problems were held fixed. '
+        '(A) Herbal formulas. (B) Matched food samples. Observed test compositions, five-fold assignments, and all leave-one-ingredient-out problems were held fixed. '
         'Within each training fold, source-record multiplicities were expanded before Curveball randomization, '
         'preserving each source-record length and the weighted occurrence count of every ingredient. '
         f'Gray bars average {draws} independently seeded finite randomization runs per cohort; '
@@ -1690,8 +1638,8 @@ def relationship_positions(edges, wide=False):
             radius=2.45 if full_width else 1.05
             positions[name]=np.array([center+radius*xy[0],-(heights[col]+height/2)+.35*height*xy[1]])
         # Repel overlapping label rectangles within each displayed component.
-        half_width={x:.045*max(len(part) for part in ingredient_display_name(x).split('\n'))+.10 for x in names}
-        half_height={x:.22+.10*x.count('_') for x in names}
+        half_width={x:.045*max(len(part) for part in ingredient_display_name(x, wrap=True).split('\n'))+.10 for x in names}
+        half_height={x:.20+.14*ingredient_display_name(x, wrap=True).count('\n') for x in names}
         for _ in range(300):
             moved=False
             for i,a in enumerate(names):
@@ -1800,7 +1748,7 @@ def make_relationship_atlas(work_dir, figures):
             v=verified[r['source_id']]
             if r['composition']!=v['composition'] or r['names_or_title']!=v['title']:raise AssertionError('Food source mismatch')
             r.update(source_file='recipe1M_layers.tar.gz:layer1.json + det_ingrs.json',source_verified=True)
-    # The displayed food sample is illustrative; report stability over all existing samples.
+    # Summarize displayed food pairs across the matched samples.
     targets={(r['ingredient_a'],r['ingredient_b']):[] for r in displayed['food']}
     for rep in range(1,101):
         for r in read_training_pairs(structure/f'cohorts/food_{rep:03d}/training_pairs.csv'):
@@ -1818,14 +1766,14 @@ def make_relationship_atlas(work_dir, figures):
     positions=[];max_ratio=max(r['ratio'] for rows in displayed.values() for r in rows)
     with mpl.rc_context({'font.family':'sans-serif','font.sans-serif':['DejaVu Sans'],
             'font.size':8,'svg.fonttype':'none','svg.hashsalt':'HFC-ratio-atlas'}):
-        fig,axes=plt.subplots(2,1,figsize=(7.2,10.2))
-        for ax,domain,title in zip(axes,('herbal','food'),('Herbal','Food')):
+        fig,axes=plt.subplots(2,1,figsize=(7.2,11.4), gridspec_kw={'height_ratios':[1.5,1]})
+        for ax,domain,title in zip(axes,('herbal','food'),('(A) Herbal','(B) Food')):
             rows=displayed[domain];graph,pos,height=relationship_positions(rows, wide=domain=='food')
             freq=Counter(x for r in cohorts[domain] for x in r['herbs' if domain=='herbal' else 'ingredients'].split('|'))
             ratio_lookup={frozenset((r['ingredient_a'],r['ingredient_b'])):r['ratio'] for r in rows}
             nx.draw_networkx_edges(graph,pos,ax=ax,edge_color='#686868',width=[.5+3*ratio_lookup[frozenset((a,b))]/max_ratio for a,b in graph.edges])
             nx.draw_networkx_nodes(graph,pos,ax=ax,node_size=25,node_color='white',edgecolors='#444444',linewidths=.7)
-            labels={x:ingredient_display_name(x) for x in graph}
+            labels={x:ingredient_display_name(x, wrap=True) for x in graph}
             nx.draw_networkx_labels(graph,pos,labels=labels,ax=ax,font_family='DejaVu Sans',font_size=8,
                                     bbox={'facecolor':'white','edgecolor':'none','pad':.35})
             ax.set_xlim(-.25,6.5);ax.set_ylim(-height-.15,.15);ax.axis('off');ax.set_title(title,loc='left',fontsize=10)
@@ -1836,7 +1784,7 @@ def make_relationship_atlas(work_dir, figures):
         fig.tight_layout(rect=[0,.065,1,1]);structure_save(fig,figures,'Figure5_ingredient_relationships')
     write_csv(out/'network_positions.csv',tuple(positions[0]),positions)
     caption=('Fig. 5. Ingredient relationships relative to frequency-preserving randomization. Counts use the same training data as Fig. 4. '
-        'Upper: herbal; lower: all 100 matched food samples pooled. Herb names are Romanized Korean names. Source-record weights are retained. '
+        '(A) Herbal formulas. (B) Food recipes aggregated across 100 matched samples. Pharmacopoeial names are used for display. Source-record weights are retained. '
         'For each pair, original counts are averaged over five training folds; randomized counts are averaged over the same folds and all randomization runs. '
         'For food, the numerator and denominator are additionally averaged across all 100 samples, including samples with zero observed co-occurrence; sample ratios are not averaged. Line width represents the ratio on a common scale. '
         'Each panel shows the 30 largest finite ratios above one among pairs occurring in at least 10 unique compositions per sample on average (10 for herbal; summed sample support of at least 1,000 for food). Repeated compositions across food samples are retained as sampled memberships, not independent records. '
@@ -1854,32 +1802,12 @@ def make_relationship_atlas(work_dir, figures):
         'aggregation':'ratio of counts averaged over folds and all samples; shuffled denominator also averaged over draws',
         'shared_randomizations':True}
     (out/'metadata.json').write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n')
-    write_relationship_report(out,figures,ranked,examples,stability)
     print('Relationship atlas complete: 60 displayed pairs and '+str(len(examples))+' verified source examples.',flush=True)
     return metadata
 
 
 def eligible_recipe_for_atlas(composition,layer):
     return eligible(composition,valid_instructions(layer))
-
-
-def write_relationship_report(out,figures,ranked,examples,stability):
-    lines=['# 일원화한 Curveball 분석','',
-        '추천 성능과 관계 지도는 동일한 학습자료·원자료 가중치·20회 무작위화를 사용합니다. 평가자료는 섞지 않습니다.',
-        '횟수는 학습 원자료 기록의 fold 평균이며 음식은 100개 표본 전체에서 추가 평균합니다. 관찰 횟수 0인 표본도 포함합니다. fold·표본의 중복은 독립 관측이 아닙니다.',
-        '배수는 원래 평균 횟수 / 섞은 뒤 평균 횟수입니다. 유의성 검정은 하지 않습니다.','',
-        f'![관계 지도]({figures.resolve() / "Figure5_ingredient_relationships.png"})','']
-    for domain,title in [('herbal','한약'),('food','음식 100개 표본 종합')]:
-        lines += ['## '+title,'','| 조합 | 원래 학습 횟수 평균 | 섞은 학습 횟수 평균 | 배수 |','|---|---:|---:|---:|']
-        for r in ranked[domain][:30]:
-            lines.append(f"| {r['ingredient_a']}–{r['ingredient_b']} | {r['observed_training_mean']:.2f} | {r['randomized_training_mean']:.2f} | {r['ratio']:.2f} |")
-        for r in ranked[domain][:30]:
-            lines += ['',f"**{r['ingredient_a']}–{r['ingredient_b']} 원자료 예시**"]
-            for e in examples:
-                if e['domain']==domain and e['pair_rank']==r['rank']:
-                    lines.append(f"- {e['names_or_title']} — {e['composition'].replace('|', ', ')} ({e['source_file']}, {e['source_id']}, p. {e['source_pages']})")
-    lines += ['','음식 표본별 반복 여부는 food_pair_stability.csv에 제공합니다. 작은 분모로 큰 배수가 생길 수 있으므로 횟수를 함께 확인해야 합니다.']
-    (out/'results.md').write_text('\n'.join(lines)+'\n')
 
 
 def heading(text):
@@ -1981,20 +1909,16 @@ if __name__ == "__main__":
     parser.add_argument("--frequency-only", action="store_true")
     parser.add_argument("--predictive-null-only", action="store_true")
     parser.add_argument("--relationships-only", action="store_true")
-    parser.add_argument("--aggregate-food-only", action="store_true")
     parser.add_argument("--predictive-draws", type=int, default=20)
     parser.add_argument("--workers", type=int, default=2)
     args = parser.parse_args()
-    if sum((args.evaluate_only, args.frequency_only, args.predictive_null_only, args.relationships_only, args.aggregate_food_only)) > 1:
+    if sum((args.evaluate_only, args.frequency_only, args.predictive_null_only, args.relationships_only)) > 1:
         parser.error("Choose only one analysis-only mode")
     if args.predictive_draws < 2:
         parser.error("--predictive-draws must be at least 2")
     if args.workers < 1:
         parser.error("--workers must be at least 1")
-    if args.aggregate_food_only:
-        aggregate_food_relationships(ROOT / "work", workers=args.workers)
-        make_relationship_atlas(ROOT / "work", ROOT / "figures")
-    elif args.relationships_only:
+    if args.relationships_only:
         make_relationship_atlas(ROOT / "work", ROOT / "figures")
     elif args.predictive_null_only:
         evaluate_predictive_null(ROOT / "work", workers=args.workers, draws=args.predictive_draws)

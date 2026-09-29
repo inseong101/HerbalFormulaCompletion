@@ -42,3 +42,7 @@ Generated audit tables and scores are saved under `work/`. The manuscript figure
 5. `Figure5_ingredient_relationships`: herbal and pooled-food relationship maps.
 
 Table 1 scores are saved in `work/recommendation_example/top10.csv`. These generated files are outputs, not raw data.
+
+## Display names
+
+`herbal_display_names.csv` maps the 62 herbs shown in the manuscript to pharmacopoeial display names, with sources and author-confirmed qualifiers. Source data and statistical identifiers remain unchanged.
