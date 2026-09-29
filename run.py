@@ -1276,7 +1276,7 @@ def predictive_shuffle(original, lengths, seed, trades_per_row):
     return shuffled
 
 
-def relationship_pair_candidates(rows, field):
+def relationship_pair_candidates(rows, field, pair_keys=None):
     """Display support is unique compositions; all reported counts retain source weights."""
     unique_support = Counter()
     weighted_support = Counter()
@@ -1284,9 +1284,87 @@ def relationship_pair_candidates(rows, field):
         pairs = list(combinations(sorted(row[field].split('|')), 2))
         unique_support.update(pairs)
         weighted_support.update({pair: int(row['weight']) for pair in pairs})
-    keys = sorted(pair for pair, count in unique_support.items() if count >= 10)
+    keys = list(pair_keys) if pair_keys is not None else sorted(pair for pair, count in unique_support.items() if count >= 10)
     support = [(unique_support[pair], weighted_support[pair]) for pair in keys]
     return keys, support
+
+
+def food_relationship_candidates(cohorts):
+    counts=Counter()
+    for rows in cohorts.values():
+        for r in rows: counts.update(combinations(sorted(r['ingredients'].split('|')),2))
+    # Same support density as herbal: at least ten unique compositions per sample on average.
+    return sorted(pair for pair,n in counts.items() if n >= 10*len(cohorts))
+
+
+def replay_training_pairs(task):
+    domain,rep,rows,field,output,draws,trades,seed,baseline,pair_keys=task
+    output=Path(output);meta=json.loads((output/'metadata.json').read_text())
+    if meta['status']!='complete' or meta['draws']!=draws or meta['trades_per_row']!=trades or meta['seed']!=seed:
+        raise ValueError('Prediction run settings mismatch')
+    if meta['input_sha256']!=hashlib.sha256(json.dumps(rows,sort_keys=True).encode()).hexdigest():
+        raise ValueError('Prediction input mismatch')
+    keys,support=relationship_pair_candidates(rows,field,pair_keys)
+    old=dict(np.load(output/'training_pair_counts.npz'))
+    old_index={(a,b):i for i,(a,b) in enumerate(zip(old['ingredient_a'],old['ingredient_b']))}
+    shared=[(j,old_index[key]) for j,key in enumerate(keys) if key in old_index]
+    audits=read_rows(output/'fold_audit.csv')
+    before=np.zeros((5,len(keys)),dtype=np.int64);after=np.zeros((5,draws,len(keys)),dtype=np.int64)
+    folds=assign_composition_folds(rows,ingredient_field=field)
+    for f in range(5):
+        train=[r for j,fold in enumerate(folds) if j!=f for r in fold]
+        vocab,matrix,lengths,freq,*_=structure_prepare(train,field,weighted=True)
+        index={v:i for i,v in enumerate(vocab)}
+        a=np.array([index.get(x,-1) for x,y in keys]);b=np.array([index.get(y,-1) for x,y in keys]);present=(a>=0)&(b>=0)
+        counts=predictive_pair_counts(matrix,lengths,len(vocab));before[f,present]=counts[a[present],b[present]]
+        for d in range(draws):
+            draw_seed=seed+rep*100000+f*1000+d
+            assert int(audits[f*draws+d]['seed'])==draw_seed
+            shuffled=predictive_shuffle(matrix,lengths,draw_seed,trades)
+            assert np.array_equal(np.bincount(shuffled[shuffled>=0],minlength=len(vocab)),freq)
+            counts=predictive_pair_counts(shuffled,lengths,len(vocab));after[f,d,present]=counts[a[present],b[present]]
+    for j,k in shared:
+        assert np.array_equal(before[:,j],old['observed'][:,k])
+        assert np.array_equal(after[:,:,j],old['randomized'][:,:,k])
+    save_training_pair_results(output,keys,support,before,after,audits)
+    (output/'pair_replay_audit.json').write_text(json.dumps({'same_prediction_seeds':True,'previous_pairs_exactly_reproduced':len(shared),'global_candidates':len(keys),'includes_zero_and_low_support_samples':True},indent=2)+'\n')
+    return len(shared)
+
+
+def aggregate_food_relationships(work_dir, workers=2):
+    from concurrent.futures import ProcessPoolExecutor
+    work_dir=Path(work_dir);root=work_dir/'predictive_null';meta=json.loads((root/'metadata.json').read_text())
+    members=read_rows(work_dir/'matching/membership.csv');wanted={r['composition_id'] for r in members}
+    food={r['composition_id']:r for r in read_rows(work_dir/'food/unique_compositions.csv') if r['composition_id'] in wanted}
+    cohorts=defaultdict(list)
+    for r in members:cohorts[int(r['replicate'])].append(food[r['composition_id']])
+    keys=food_relationship_candidates(cohorts)
+    tasks=[('food',rep,rows,'ingredients',root/f'cohorts/food_{rep:03d}',meta['draws'],meta['trades_per_row'],meta['seed'],None,keys) for rep,rows in sorted(cohorts.items())]
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        for i,result in enumerate(pool.map(replay_training_pairs,tasks),1):
+            if i%10==0:print(f'Food pair replay: {i}/100',flush=True)
+    return keys
+
+
+def pooled_food_pairs(root):
+    groups=defaultdict(list)
+    for rep in range(1,101):
+        for r in read_training_pairs(root/f'cohorts/food_{rep:03d}/training_pairs.csv'):
+            groups[r['ingredient_a'],r['ingredient_b']].append(r)
+    result=[]
+    for (a,b),rows in sorted(groups.items()):
+        if len(rows)!=100:raise ValueError('Run --aggregate-food-only to collect every candidate in all samples')
+        before=sum(r['observed_training_mean'] for r in rows)/100
+        after=sum(r['randomized_training_mean'] for r in rows)/100
+        result.append({'ingredient_a':a,'ingredient_b':b,
+            'unique_composition_support':sum(r['unique_composition_support'] for r in rows),
+            'source_record_support':sum(r['source_record_support'] for r in rows),
+            'observed_training_mean':before,'randomized_training_mean':after,
+            'ratio':before/after if after else None,
+            'observed_fold_sum':sum(r['observed_fold_sum'] for r in rows),
+            'randomized_fold_mean_sum':sum(r['randomized_fold_mean_sum'] for r in rows),
+            'positive_excess':before>after})
+    return result
 
 
 def save_training_pair_results(output, keys, support, observed, randomized, audits):
@@ -1383,16 +1461,17 @@ def predictive_null_code_hash():
     functions = (curveball_trade.py_func, predictive_pair_counts.py_func,
                  predictive_nminus1_hits.py_func, predictive_shuffle.py_func,
                  predictive_null_cohort, assign_composition_folds, structure_prepare,
-                 relationship_pair_candidates, save_training_pair_results)
+                 relationship_pair_candidates, food_relationship_candidates, save_training_pair_results)
     return hashlib.sha256((''.join(inspect.getsource(f) for f in functions)
                            + np.__version__ + numba.__version__).encode()).hexdigest()
 
 
 def predictive_null_cohort(task):
-    domain, replicate, rows, field, output, draws, trades_per_row, seed, baseline_dir = task
+    domain, replicate, rows, field, output, draws, trades_per_row, seed, baseline_dir, pair_keys = task
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    signature = {'domain': domain, 'replicate': replicate, 'draws': draws,
+    signature = {'pair_keys_sha256': hashlib.sha256(json.dumps(pair_keys, ensure_ascii=False).encode()).hexdigest(),
+                 'domain': domain, 'replicate': replicate, 'draws': draws,
                  'trades_per_row': trades_per_row, 'seed': seed,
                  'algorithm_sha256': predictive_null_code_hash(),
                  'input_sha256': hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()}
@@ -1412,7 +1491,7 @@ def predictive_null_cohort(task):
     with gzip.open(baseline_path, 'rt', encoding='utf-8') as f:
         for r in csv.DictReader(f):
             if r['condition'] == 'N-1': existing[r['composition_id'], r['method']] = float(r['performance'])
-    pair_keys, pair_support = relationship_pair_candidates(rows, field)
+    pair_keys, pair_support = relationship_pair_candidates(rows, field, pair_keys)
     original_pairs = np.zeros((5, len(pair_keys)), dtype=np.int64)
     shuffled_pairs = np.zeros((5, draws, len(pair_keys)), dtype=np.int64)
     baseline_checks = 0
@@ -1602,8 +1681,9 @@ def evaluate_predictive_null(work_dir, workers=2, draws=20, trades_per_row=50):
                 'randomization_uncertainty':'Independent seeds with a fresh start from observed training data and finite trades; no claim of exact uniform independent draws.',
                 'inference':f'{draws} runs are exploratory stability repeats, not biological replicates. No Monte Carlo p-values or causal attribution are reported.'}
     (out/'metadata.json').write_text(json.dumps(metadata,indent=2)+'\n')
+    global_food_keys=food_relationship_candidates(cohorts)
     def task(domain,rep,rows,field,folder,trades):
-        return (domain,rep,rows,field,folder,draws,trades,20261001,work_dir/f'evaluation/cohorts/{domain}_{rep:03d}')
+        return (domain,rep,rows,field,folder,draws,trades,20261001,work_dir/f'evaluation/cohorts/{domain}_{rep:03d}',global_food_keys if domain=='food' else None)
     print('Training-only randomization: herbal cohort',flush=True)
     results = predictive_null_cohort(task('herbal',0,herbs,'herbs',out/'cohorts/herbal_000',trades_per_row))
     tasks = [task('food',rep,rows,'ingredients',out/f'cohorts/food_{rep:03d}',trades_per_row) for rep,rows in sorted(cohorts.items())]
@@ -1707,28 +1787,38 @@ def make_relationship_atlas(work_dir, figures):
             if hashlib.file_digest(h,'sha256').hexdigest()!=wanted:raise ValueError('Structure and composition inputs differ: '+name)
     herbs=read_rows(work_dir/'herbal/unique_compositions.csv')
     members=read_rows(work_dir/'matching/membership.csv')
-    wanted={r['composition_id'] for r in members if int(r['replicate'])==1}
+    wanted={r['composition_id'] for r in members}
+    membership_count=Counter(r['composition_id'] for r in members)
     with (work_dir/'food/unique_compositions.csv').open(encoding='utf-8-sig',newline='') as h:
         foods=[r for r in csv.DictReader(h) if r['composition_id'] in wanted]
-    assert len(herbs)==len(foods)==2009
+    assert len(herbs)==2009 and len(members)==100*2009
     cohorts={'herbal':herbs,'food':foods};ranked={};displayed={};all_rows=[];examples=[]
     pair_input_hashes={}
     for domain,rep,field in [('herbal',0,'herbs'),('food',1,'ingredients')]:
         path=structure/f'cohorts/{domain}_{rep:03d}/training_pairs.csv'
         with path.open('rb') as h:pair_input_hashes[domain]=hashlib.file_digest(h,'sha256').hexdigest()
-        pairs=read_training_pairs(path)
+        pairs=pooled_food_pairs(structure) if domain=='food' else read_training_pairs(path)
+        if domain=='food':
+            pair_input_hashes[domain]={}
+            for sample in range(1,101):
+                q=structure/f'cohorts/food_{sample:03d}/training_pairs.csv'
+                with q.open('rb') as h:pair_input_hashes[domain][str(sample)]=hashlib.file_digest(h,'sha256').hexdigest()
         eligible=[r for r in pairs if r['ratio'] is not None and r['ratio']>1]
         eligible.sort(key=lambda r:(-r['ratio'],-r['observed_training_mean'],r['ingredient_a'],r['ingredient_b']))
-        lookup_rows=[(r,set(r[field].split('|'))) for r in cohorts[domain]]
+        selected_keys={(r['ingredient_a'],r['ingredient_b']) for r in eligible}
+        support_lookup=defaultdict(list)
+        for r in cohorts[domain]:
+            for key in combinations(sorted(r[field].split('|')),2):
+                if key in selected_keys:support_lookup[key].append(r)
         ranked[domain]=[]
         for i,pair in enumerate(eligible,1):
-            item=dict(pair,domain=domain,replicate=rep,rank=i,ratio=pair['ratio'],displayed=i<=30)
-            supporting=[r for r,s in lookup_rows if {pair['ingredient_a'],pair['ingredient_b']}<=s]
-            if len(supporting)!=pair['unique_composition_support'] or sum(int(r['weight']) for r in supporting)!=pair['source_record_support']:raise AssertionError('Pair support does not match unique compositions')
+            item=dict(pair,domain=domain,replicate="pooled" if domain=="food" else rep,rank=i,ratio=pair['ratio'],displayed=i<=30)
+            supporting=support_lookup[pair['ingredient_a'],pair['ingredient_b']]
+            if sum(membership_count[r['composition_id']] if domain=='food' else 1 for r in supporting)!=pair['unique_composition_support'] or sum(int(r['weight'])*(membership_count[r['composition_id']] if domain=='food' else 1) for r in supporting)!=pair['source_record_support']:raise AssertionError('Pair support does not match unique compositions')
             ranked[domain].append(item);all_rows.append(item)
             if i<=30:
                 for r in sorted(supporting,key=lambda r:r['composition_id'])[:3]:
-                    examples.append({'domain':domain,'replicate':rep,'pair_rank':i,
+                    examples.append({'domain':domain,'replicate':'pooled' if domain=='food' else rep,'pair_rank':i,
                         'ingredient_a':pair['ingredient_a'],'ingredient_b':pair['ingredient_b'],
                         'composition_id':r['composition_id'],'composition':r[field],
                         'source_weight':int(r['weight']),
@@ -1784,7 +1874,7 @@ def make_relationship_atlas(work_dir, figures):
     for key,rows in targets.items():
         ratios=[r['ratio'] for r in rows if r['ratio'] is not None]
         stability.append({'ingredient_a':key[0],'ingredient_b':key[1],
-            'support10_samples':len(rows),'ratio_above1_samples':sum(r['ratio'] is not None and r['ratio']>1 for r in rows),
+            'support10_samples':sum(r['unique_composition_support']>=10 for r in rows),'samples_with_pair':sum(r['unique_composition_support']>0 for r in rows),'ratio_above1_samples':sum(r['ratio'] is not None and r['ratio']>1 for r in rows),
             'ratio_median':float(np.median(ratios)) if ratios else ''})
     for filename,rows in [('ranked_pairs.csv',all_rows),('displayed_pairs.csv',displayed['herbal']+displayed['food']),
                           ('source_examples.csv',examples),('food_pair_stability.csv',stability)]:
@@ -1793,7 +1883,7 @@ def make_relationship_atlas(work_dir, figures):
     with mpl.rc_context({'font.family':'sans-serif','font.sans-serif':['Arial','DejaVu Sans'],
             'font.size':10,'svg.fonttype':'none','svg.hashsalt':'HFC-ratio-atlas'}):
         fig,axes=plt.subplots(1,2,figsize=(13,9))
-        for ax,domain,title in zip(axes,('herbal','food'),('A  Herbal','B  Food sample 1')):
+        for ax,domain,title in zip(axes,('herbal','food'),('A  Herbal','B  Food')):
             rows=displayed[domain];graph,pos,height=relationship_positions(rows)
             freq=Counter(x for r in cohorts[domain] for x in r['herbs' if domain=='herbal' else 'ingredients'].split('|'))
             ratio_lookup={frozenset((r['ingredient_a'],r['ingredient_b'])):r['ratio'] for r in rows}
@@ -1810,22 +1900,22 @@ def make_relationship_atlas(work_dir, figures):
         fig.tight_layout(rect=[0,.065,1,1]);structure_save(fig,figures,'Figure6_ingredient_relationships')
     write_csv(out/'network_positions.csv',tuple(positions[0]),positions)
     caption=('Fig. 6. Ingredient relationships from the same randomized training data used in Figure 5. '
-        'A: herbal; B: predefined food sample 1. Source-record weights are retained. '
+        'A: herbal; B: all 100 matched food samples pooled. Source-record weights are retained. '
         'For each pair, original counts are averaged over five training folds; randomized counts are averaged over the same folds and all randomization runs. '
-        'Line width represents the ratio of these means, on a common scale. '
-        'Each panel shows the 30 largest finite ratios above one among pairs supported by at least 10 unique compositions in that cohort. '
+        'For food, the numerator and denominator are additionally averaged across all 100 samples, including samples with zero observed co-occurrence; sample ratios are not averaged. Line width represents the ratio on a common scale. '
+        'Each panel shows the 30 largest finite ratios above one among pairs occurring in at least 10 unique compositions per sample on average (10 for herbal; summed sample support of at least 1,000 for food). Repeated compositions across food samples are retained as sampled memberships, not independent records. '
         'Pairs with zero randomized mean have no finite ratio and are retained in the downloadable counts but omitted from ranking. '
         'The map is descriptive; no p-values or significance filtering are used. '
         'Positions aid readability and are not measured similarities or inferred communities. '
         'Repeated appearances across training folds are not independent observations.')
     (figures/'Figure6_caption.txt').write_text(caption+'\n')
     metadata={'status':'complete','basis':'source-weighted training records, identical to prediction comparison',
-        'selection':'Top 30 finite ratios >1; unique composition support >=10; no significance testing',
-        'food_sample':1,'draws_per_fold':source_meta['draws'],'folds':5,
+        'selection':'Top 30 finite ratios >1; average unique support per sample >=10; no significance testing',
+        'food_samples':100,'draws_per_fold':source_meta['draws'],'folds':5,
         'input_hashes':source_meta['input_hashes'],'pair_result_sha256':pair_input_hashes,
         'verified_source_examples':len(examples),'unique_food_source_records_verified':len(food_ids),
         'all_pair_counts_independently_recounted':True,
-        'aggregation':'ratio of original mean over folds to randomized mean over folds and draws',
+        'aggregation':'ratio of counts averaged over folds and all samples; shuffled denominator also averaged over draws',
         'shared_randomizations':True}
     (out/'metadata.json').write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n')
     write_relationship_report(out,figures,ranked,examples,stability)
@@ -1840,10 +1930,10 @@ def eligible_recipe_for_atlas(composition,layer):
 def write_relationship_report(out,figures,ranked,examples,stability):
     lines=['# 일원화한 Curveball 분석','',
         '추천 성능과 관계 지도는 동일한 학습자료·원자료 가중치·20회 무작위화를 사용합니다. 평가자료는 섞지 않습니다.',
-        '횟수는 fold별 학습 원자료 기록에서 센 평균입니다. 같은 조성은 네 학습 fold에 포함되며 이를 독립 관측으로 보지 않습니다.',
+        '횟수는 학습 원자료 기록의 fold 평균이며 음식은 100개 표본 전체에서 추가 평균합니다. 관찰 횟수 0인 표본도 포함합니다. fold·표본의 중복은 독립 관측이 아닙니다.',
         '배수는 원래 평균 횟수 / 섞은 뒤 평균 횟수입니다. 유의성 검정은 하지 않습니다.','',
         f'![관계 지도]({figures.resolve() / "Figure6_ingredient_relationships.png"})','']
-    for domain,title in [('herbal','한약'),('food','음식 표본 1번')]:
+    for domain,title in [('herbal','한약'),('food','음식 100개 표본 종합')]:
         lines += ['## '+title,'','| 조합 | 원래 학습 횟수 평균 | 섞은 학습 횟수 평균 | 배수 |','|---|---:|---:|---:|']
         for r in ranked[domain][:30]:
             lines.append(f"| {r['ingredient_a']}–{r['ingredient_b']} | {r['observed_training_mean']:.2f} | {r['randomized_training_mean']:.2f} | {r['ratio']:.2f} |")
@@ -1955,16 +2045,20 @@ if __name__ == "__main__":
     parser.add_argument("--frequency-only", action="store_true")
     parser.add_argument("--predictive-null-only", action="store_true")
     parser.add_argument("--relationships-only", action="store_true")
+    parser.add_argument("--aggregate-food-only", action="store_true")
     parser.add_argument("--predictive-draws", type=int, default=20)
     parser.add_argument("--workers", type=int, default=2)
     args = parser.parse_args()
-    if sum((args.evaluate_only, args.frequency_only, args.predictive_null_only, args.relationships_only)) > 1:
+    if sum((args.evaluate_only, args.frequency_only, args.predictive_null_only, args.relationships_only, args.aggregate_food_only)) > 1:
         parser.error("Choose only one analysis-only mode")
     if args.predictive_draws < 2:
         parser.error("--predictive-draws must be at least 2")
     if args.workers < 1:
         parser.error("--workers must be at least 1")
-    if args.relationships_only:
+    if args.aggregate_food_only:
+        aggregate_food_relationships(ROOT / "work", workers=args.workers)
+        make_relationship_atlas(ROOT / "work", ROOT / "figures")
+    elif args.relationships_only:
         make_relationship_atlas(ROOT / "work", ROOT / "figures")
     elif args.predictive_null_only:
         evaluate_predictive_null(ROOT / "work", workers=args.workers, draws=args.predictive_draws)
