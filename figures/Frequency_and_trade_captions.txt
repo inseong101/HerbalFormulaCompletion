@@ -1,3 +1,0 @@
-Fig. 3. Ingredient rank–frequency distributions in eligible source records. Each domain is shown by one line retaining source-record multiplicities. The denominator is 2,992 herbal source records or 921,927 food source records, respectively. The full food source pool is used here, not the matched samples.
-
-Fig. 4. Example of a Curveball exchange. A–B–C and A–D–E become A–B–E and A–D–C. Each record still contains three ingredients and every ingredient retains its total occurrence count. Repeated exchanges are applied to training records only.

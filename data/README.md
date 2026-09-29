@@ -31,4 +31,14 @@ data/recipe1m/recipe1M_layers.tar.gz
 
 ## Generated files
 
-Running `python run.py` creates `work/herbal/`, `work/food/`, and the two Figure 1 files in `figures/`. These are outputs, not raw data.
+Running `python run.py` reproduces preprocessing, Table 1's recommendation example, exhaustive N−1 evaluation, frequency distributions, and the shared training randomizations for recommendation comparison and relationship maps. `Colab.ipynb` runs the same pipeline step by step from the raw inputs.
+
+Generated audit tables and scores are saved under `work/`. The manuscript figures are:
+
+1. `Figure1_dataset_matching`: ingredient-count distributions before matching.
+2. `Figure2_recommendation_performance`: N−1 Hit@10.
+3. `Figure3_ingredient_frequency`: source-record frequency distributions.
+4. `Figure4_training_randomization`: original versus randomized training performance.
+5. `Figure5_ingredient_relationships`: herbal and pooled-food relationship maps.
+
+Table 1 scores are saved in `work/recommendation_example/top10.csv`. These generated files are outputs, not raw data.

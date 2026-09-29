@@ -728,28 +728,15 @@ def recommendation_example(herbal_path, output_dir, fold_seed=20260812):
 
 
 EVALUATION_MODELS = ("popularity", "mean_conditional", "mean_jaccard")
-EVALUATION_CONDITIONS = ("2", "3", "50%", "75%", "N-1")
+EVALUATION_CONDITIONS = ("N-1",)
 
 
-def evaluation_contexts(row, condition, ingredient_field, seed=20260823, maximum=5):
+def evaluation_contexts(row, condition, ingredient_field):
+    """Exhaustive leave-one-ingredient-out inputs for the manuscript evaluation."""
+    if condition != "N-1":
+        raise ValueError("Only N-1 evaluation is supported")
     items = tuple(sorted(row[ingredient_field].split("|")))
-    n = len(items)
-    if condition == "N-1":
-        size = n - 1
-    elif condition.endswith("%"):
-        size = min(n - 1, max(1, math.floor(n * int(condition[:-1]) / 100 + 0.5)))
-    else:
-        size = int(condition)
-    if not 1 <= size < n:
-        return []
-    if condition == "N-1" or math.comb(n, size) <= maximum:
-        return list(combinations(items, size))
-    digest = hashlib.sha256((row["composition_id"] + condition).encode()).hexdigest()[:16]
-    rng = random.Random(int(digest, 16) + seed)
-    result = set()
-    while len(result) < maximum:
-        result.add(tuple(sorted(rng.sample(items, size))))
-    return sorted(result)
+    return list(combinations(items, len(items) - 1))
 
 
 def strict_top_indices(scores, k=10):
@@ -766,9 +753,9 @@ def strict_top_indices(scores, k=10):
 
 
 def evaluate_cohort(task):
-    """One cohort: five folds, three methods, five input conditions."""
+    """One cohort: five folds, three methods, exhaustive N-1 inputs."""
     import numpy as np
-    domain, replicate, rows, ingredient_field, output_dir, fold_seed, context_seed = task
+    domain, replicate, rows, ingredient_field, output_dir, fold_seed = task
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     buckets = assign_composition_folds(rows, seed=fold_seed, ingredient_field=ingredient_field)
@@ -803,7 +790,7 @@ def evaluate_cohort(task):
             for row in test:
                 full = set(row[ingredient_field].split("|"))
                 for condition in EVALUATION_CONDITIONS:
-                    contexts = evaluation_contexts(row, condition, ingredient_field, context_seed)
+                    contexts = evaluation_contexts(row, condition, ingredient_field)
                     if not contexts:
                         continue
                     hits = Counter()
@@ -852,7 +839,7 @@ def evaluate_cohort(task):
                     values = accum[condition, model]
                     fold_rows.append({"domain": domain, "replicate": replicate, "fold": fold_index,
                         "condition": condition, "method": model,
-                        "metric": "Hit@10" if condition == "N-1" else "Recall@10",
+                        "metric": "Hit@10",
                         "train_unique": len(train), "test_unique": len(test),
                         "eligible_test_unique": len(values), "excluded_test_unique": len(test) - len(values),
                         "contexts": sum(v["contexts"] for v in values),
@@ -900,21 +887,20 @@ def evaluate_all(work_dir, workers=2):
             hashes[name] = hashlib.file_digest(handle, "sha256").hexdigest()
     metadata = {"status": "running", "models": list(EVALUATION_MODELS),
                 "conditions": list(EVALUATION_CONDITIONS), "folds": 5, "fold_seed": 20260812,
-                "context_seed": 20260823, "maximum_contexts_per_composition_condition": {"N-1": "all N leave-one-out cases", "other_conditions": 5},
+                "contexts_per_composition": "all N leave-one-out cases",
                 "input_hashes": hashes,
                 "training_weight": "source-record multiplicity",
                 "evaluation_weight": "mean within each composition, then equal weight to each eligible composition across all test folds",
-                "percentage_input_rounding": "nearest integer, halves rounded up; at least 1, at most N-1",
                 "unseen_hidden_ingredients": "count as misses; retained in metric denominator",
                 "ranking": "strict Top-10; descending score then Unicode ingredient name",
                 "food_summary": "mean, sample SD, and empirical 2.5th–97.5th percentiles across 100 samples; percentiles are not confidence intervals",
                 "scope": "main recommendation performance, excluding structure and learning-curve analyses"}
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print("Evaluating herbal cohort...", flush=True)
-    fold_rows, audit = evaluate_cohort(("herbal", 0, herbs, "herbs", out / "cohorts/herbal_000", 20260812, 20260823))
+    fold_rows, audit = evaluate_cohort(("herbal", 0, herbs, "herbs", out / "cohorts/herbal_000", 20260812))
     audits = [audit]
     print("Herbal cohort complete. Evaluating 100 food samples...", flush=True)
-    tasks = [("food", rep, rows, "ingredients", out / f"cohorts/food_{rep:03d}", 20260812, 20260823)
+    tasks = [("food", rep, rows, "ingredients", out / f"cohorts/food_{rep:03d}", 20260812)
              for rep, rows in sorted(cohorts.items())]
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(evaluate_cohort, task) for task in tasks]
@@ -990,64 +976,13 @@ def make_evaluation_figure(summary, output_dir):
             metadata = {"Date": None} if ext == "svg" else ({"CreationDate": None, "ModDate": None} if ext == "pdf" else None)
             fig.savefig(output_dir / f"Figure2_recommendation_performance.{ext}", dpi=600, bbox_inches="tight", facecolor="white", metadata=metadata)
         plt.close(fig)
-    caption = ("Fig. 2. Recovery of a single withheld ingredient. Each ingredient in every composition was withheld once, "
+    caption = ("Fig. 2. Ingredient recommendation performance in herbal formulas and matched food samples. Each ingredient in every composition was withheld once, "
                "with all remaining ingredients provided as input. Hit@10 was averaged first within each composition and then equally across all 2,009 compositions. "
                "Black bars show herbal performance; gray bars show mean performance across 100 matched food samples. "
                "Food error bars represent empirical 2.5th–97.5th percentiles across samples, not confidence intervals.")
     (output_dir / "Figure2_caption.txt").write_text(caption + "\n", encoding="utf-8")
-    make_supplementary_evaluation_figures(summary, output_dir)
     for path in output_dir.glob("Figure*.svg"):
         path.write_text("\n".join(line.rstrip() for line in path.read_text().splitlines()) + "\n")
-
-
-def make_supplementary_evaluation_figures(summary, output_dir):
-    """Separate herbal and food plots, following the Figure 1 style."""
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    plot_models = ("popularity", "mean_conditional", "mean_jaccard")
-    labels = ("Popularity", "Mean conditional probability", "Mean pairwise Jaccard")
-    colors = ("#eeeeee", "#bdbdbd", "#222222")
-    with mpl.rc_context({"font.family": "sans-serif",
-                         "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
-                         "font.size": 9, "axes.linewidth": 0.8,
-                         "axes.spines.top": False, "axes.spines.right": False,
-                         "svg.fonttype": "none", "svg.hashsalt": "HerbalFormulaCompletion"}):
-        for domain, title in (("herbal", "Herbal"), ("food", "Food")):
-            fig, ax = plt.subplots(figsize=(7.2, 3.9))
-            width = .24
-            for method_index, (model, label, color) in enumerate(zip(plot_models, labels, colors)):
-                rows = [next(r for r in summary if r["condition"] == c and r["method"] == model)
-                        for c in EVALUATION_CONDITIONS]
-                key = "herbal_performance" if domain == "herbal" else "food_mean"
-                values = [100 * float(r[key]) for r in rows]
-                errors = None
-                if domain == "food":
-                    errors = [[v - 100 * float(r["food_p2_5"]) for v, r in zip(values, rows)],
-                              [100 * float(r["food_p97_5"]) - v for v, r in zip(values, rows)]]
-                ax.bar([i + (method_index - 1) * width for i in range(5)], values, width,
-                       color=color, edgecolor="#555555", linewidth=.5, label=label,
-                       yerr=errors, error_kw={"elinewidth": .7, "capsize": 2, "capthick": .7,
-                                             "ecolor": "#555555"})
-            ax.set_title(title, fontsize=10)
-            ax.set_xticks(range(5), ["2", "3", "50%", "75%", "N−1"])
-            ax.set_xlabel("Input ingredients retained")
-            ax.set_ylabel("Recall@10 / Hit@10 (%)")
-            ax.set_ylim(0, 65)
-            ax.set_yticks(range(0, 61, 10))
-            ax.legend(frameon=False, loc="upper left", fontsize=8)
-            for ext in ("png", "svg", "pdf"):
-                metadata = {"Date": None} if ext == "svg" else ({"CreationDate": None, "ModDate": None} if ext == "pdf" else None)
-                fig.savefig(output_dir / f"FigureS1_{domain}_performance.{ext}", dpi=600,
-                            bbox_inches="tight", facecolor="white", metadata=metadata)
-            plt.close(fig)
-    caption = ("Fig. 2. Ingredient recommendation performance in herbal formulas and matched food samples. "
-               "Separate plots show herbal performance and mean performance across 100 matched food samples. "
-               "Bars represent Popularity, Mean conditional probability, and Mean pairwise Jaccard. "
-               "Food error bars show the empirical 2.5th–97.5th percentiles across samples, not confidence intervals. "
-               "Input conditions retain 2 or 3 ingredients, 50% or 75% of ingredients, or all but one ingredient (N−1). "
-               "Performance is Recall@10, equivalent to Hit@10 for N−1. Scores are averaged within each composition and then equally across eligible compositions. "
-               "Each cohort includes 1,899 eligible compositions for the 2-ingredient condition, 1,753 for the 3-ingredient condition, and 2,009 for each remaining condition.")
-    (output_dir / "FigureS1_caption.txt").write_text(caption.replace("Fig. 2.", "Fig. S1.") + "\n", encoding="utf-8")
 
 
 def make_figure1(herbal_counts, food_counts):
@@ -1407,7 +1342,7 @@ def read_training_pairs(path):
     return rows
 
 
-def make_frequency_and_trade_figures(work_dir, figures):
+def make_frequency_figure(work_dir, figures):
     work_dir,figures=Path(work_dir),Path(figures)
     out=work_dir/'frequency';out.mkdir(parents=True,exist_ok=True);figures.mkdir(parents=True,exist_ok=True)
     frequencies=[]
@@ -1431,28 +1366,12 @@ def make_frequency_and_trade_figures(work_dir, figures):
             ax.set_xlim(0,1500);ax.set_ylim(0,60);ax.set_xlabel('Ingredient frequency rank');ax.set_title(title,loc='left')
         axes[0].set_ylabel('Source records containing ingredient (%)')
         fig.tight_layout();structure_save(fig,figures,'Figure3_ingredient_frequency')
-        fig,axes=plt.subplots(1,2,figsize=(9,3.1))
-        before=np.array([[1,1,1,0,0],[1,0,0,1,1]])
-        after=np.array([[1,1,0,0,1],[1,0,1,1,0]])
-        for ax,matrix,title in zip(axes,(before,after),('Before exchange','After exchange')):
-            ax.imshow(matrix,cmap='Greys',vmin=0,vmax=1)
-            ax.set_xticks(range(5),list('ABCDE'));ax.set_yticks([0,1],['Record 1','Record 2'])
-            for (i,j),v in np.ndenumerate(matrix):ax.text(j,i,str(v),ha='center',va='center',color='white' if v else '#333333')
-            for i in range(2):ax.text(4.8,i,'3 ingredients',va='center',fontsize=8)
-            for j in range(5):ax.text(j,1.95,str(matrix[:,j].sum()),ha='center',fontsize=9)
-            ax.text(-.65,1.95,'Total:',ha='right',fontsize=8)
-            ax.set_xlim(-.5,6.4);ax.set_ylim(2.45,-.7);ax.tick_params(length=0)
-            ax.spines[['left','bottom']].set_visible(False);ax.set_title(title)
-        fig.tight_layout();structure_save(fig,figures,'Figure4_fixed_margin_trade')
-    caption3=('Fig. 3. Ingredient rank–frequency distributions in eligible source records. '
+    caption3=('Fig. 3. Ingredient rank–frequency distributions in herbal formulas and food recipes. A: herbal; B: food. '
         'Each domain is shown by one line retaining source-record multiplicities. '
         'The denominator is 2,992 herbal source records or 921,927 food source records, respectively. '
         'The full food source pool is used here, not the matched samples.')
-    caption4=('Fig. 4. Example of a Curveball exchange. A–B–C and A–D–E become A–B–E and A–D–C. '
-        'Each record still contains three ingredients and every ingredient retains its total occurrence count. '
-        'Repeated exchanges are applied to training records only.')
-    (figures/'Frequency_and_trade_captions.txt').write_text(caption3+'\n\n'+caption4+'\n')
-    print('Frequency distribution and exchange schematic complete',flush=True)
+    (figures/'Figure3_caption.txt').write_text(caption3+'\n')
+    print('Frequency distribution complete',flush=True)
 
 
 def predictive_null_code_hash():
@@ -1638,9 +1557,9 @@ def make_predictive_null_figure(output, figures):
         axes[0].set_ylabel('Hit@10 (%)')
         axes[0].legend(frameon=False, loc='upper left', fontsize=8)
         fig.tight_layout()
-        structure_save(fig, figures, 'Figure5_training_randomization')
+        structure_save(fig, figures, 'Figure4_training_randomization')
     draws = int(json.loads((output/'metadata.json').read_text())['draws'])
-    caption = ('Fig. 5. Recommendation performance with original and randomized training data. '
+    caption = ('Fig. 4. Recommendation performance with original and randomized training data. '
         'Observed test compositions, five-fold assignments, and all leave-one-ingredient-out problems were held fixed. '
         'Within each training fold, source-record multiplicities were expanded before Curveball randomization, '
         'preserving each source-record length and the weighted occurrence count of every ingredient. '
@@ -1651,7 +1570,7 @@ def make_predictive_null_figure(output, figures):
         'Popularity predictions were identical in every original and randomized test case. '
         'This is a descriptive training-data ablation; the repeated runs are not independent datasets or a confidence interval. '
         'All run-level values and finite-randomization sensitivity results are provided with the code.')
-    (figures/'Figure5_caption.txt').write_text(caption+'\n')
+    (figures/'Figure4_caption.txt').write_text(caption+'\n')
 
 
 
@@ -1731,7 +1650,7 @@ def evaluate_predictive_null(work_dir, workers=2, draws=20, trades_per_row=50):
                     baseline_composition_checks=103*len(herbs)*3)
     (out/'metadata.json').write_text(json.dumps(metadata,indent=2)+'\n')
     make_predictive_null_figure(out,ROOT/'figures')
-    print('Complete: work/predictive_null and Figure5_training_randomization',flush=True)
+    print('Complete: work/predictive_null and Figure4_training_randomization',flush=True)
     return summary
 
 
@@ -1913,9 +1832,9 @@ def make_relationship_atlas(work_dir, figures):
         from matplotlib.lines import Line2D
         fig.legend(handles=[Line2D([0],[0],color='#686868',lw=.5+3*r/max_ratio,label=f'{r:g}×') for r in (5,20,40)],
                    title='Observed / randomized mean',loc='lower center',ncol=3,frameon=False,bbox_to_anchor=(.5,-.005),fontsize=9,title_fontsize=9)
-        fig.tight_layout(rect=[0,.065,1,1]);structure_save(fig,figures,'Figure6_ingredient_relationships')
+        fig.tight_layout(rect=[0,.065,1,1]);structure_save(fig,figures,'Figure5_ingredient_relationships')
     write_csv(out/'network_positions.csv',tuple(positions[0]),positions)
-    caption=('Fig. 6. Ingredient relationships from the same randomized training data used in Figure 5. '
+    caption=('Fig. 5. Ingredient relationships relative to frequency-preserving randomization. Counts use the same training data as Fig. 4. '
         'A: herbal; B: all 100 matched food samples pooled. Source-record weights are retained. '
         'For each pair, original counts are averaged over five training folds; randomized counts are averaged over the same folds and all randomization runs. '
         'For food, the numerator and denominator are additionally averaged across all 100 samples, including samples with zero observed co-occurrence; sample ratios are not averaged. Line width represents the ratio on a common scale. '
@@ -1924,7 +1843,7 @@ def make_relationship_atlas(work_dir, figures):
         'The map is descriptive; no p-values or significance filtering are used. '
         'Positions aid readability and are not measured similarities or inferred communities. '
         'Repeated appearances across training folds are not independent observations.')
-    (figures/'Figure6_caption.txt').write_text(caption+'\n')
+    (figures/'Figure5_caption.txt').write_text(caption+'\n')
     metadata={'status':'complete','basis':'source-weighted training records, identical to prediction comparison',
         'selection':'Top 30 finite ratios >1; average unique support per sample >=10; no significance testing',
         'food_samples':100,'draws_per_fold':source_meta['draws'],'folds':5,
@@ -1948,7 +1867,7 @@ def write_relationship_report(out,figures,ranked,examples,stability):
         '추천 성능과 관계 지도는 동일한 학습자료·원자료 가중치·20회 무작위화를 사용합니다. 평가자료는 섞지 않습니다.',
         '횟수는 학습 원자료 기록의 fold 평균이며 음식은 100개 표본 전체에서 추가 평균합니다. 관찰 횟수 0인 표본도 포함합니다. fold·표본의 중복은 독립 관측이 아닙니다.',
         '배수는 원래 평균 횟수 / 섞은 뒤 평균 횟수입니다. 유의성 검정은 하지 않습니다.','',
-        f'![관계 지도]({figures.resolve() / "Figure6_ingredient_relationships.png"})','']
+        f'![관계 지도]({figures.resolve() / "Figure5_ingredient_relationships.png"})','']
     for domain,title in [('herbal','한약'),('food','음식 100개 표본 종합')]:
         lines += ['## '+title,'','| 조합 | 원래 학습 횟수 평균 | 섞은 학습 횟수 평균 | 배수 |','|---|---:|---:|---:|']
         for r in ranked[domain][:30]:
@@ -2050,7 +1969,7 @@ def main(workers=2, predictive_draws=20):
     make_figure1(herbal_counts, food_counts)
     heading("Full recommendation evaluation")
     evaluate_all(ROOT / "work", workers=workers)
-    make_frequency_and_trade_figures(ROOT / "work", ROOT / "figures")
+    make_frequency_figure(ROOT / "work", ROOT / "figures")
     evaluate_predictive_null(ROOT / "work", workers=workers, draws=predictive_draws)
     make_relationship_atlas(ROOT / "work", ROOT / "figures")
 
@@ -2079,7 +1998,7 @@ if __name__ == "__main__":
     elif args.predictive_null_only:
         evaluate_predictive_null(ROOT / "work", workers=args.workers, draws=args.predictive_draws)
     elif args.frequency_only:
-        make_frequency_and_trade_figures(ROOT / "work", ROOT / "figures")
+        make_frequency_figure(ROOT / "work", ROOT / "figures")
     elif args.evaluate_only:
         evaluate_all(ROOT / "work", workers=args.workers)
     else:
