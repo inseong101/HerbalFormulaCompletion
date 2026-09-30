@@ -1633,6 +1633,18 @@ def relationship_positions(edges, wide=False):
             if {'turmeric','coriander','cumin','chili'} <= component:
                 for name in names:
                     if name in anchors:local[name]=np.array(anchors[name])
+        # Fixed display anchors keep short edges visible around long labels.
+        if {'baking_soda','baking_powder','buttermilk'} <= component:
+            anchors={'baking_soda':(-.25,.1),'baking_powder':(.25,.8),'buttermilk':(-.65,.85),
+                     'oats':(-1,.25),'cocoa':(-.75,-.3),'extract':(-1,-.8),
+                     'applesauce':(.2,-.45),'cinnamon':(.65,-.1),'nutmeg':(1,.5),
+                     'raisins':(1,-.45),'allspice':(.5,-1)}
+            local.update({x:np.array(v) for x,v in anchors.items() if x in component})
+        if {'산사','산사육','맥아'} == component:
+            local={'산사':np.array([-.8,.85]),'맥아':np.array([.6,0]),'산사육':np.array([-.8,-.85])}
+        if {'ketchup','mustard','worcestershire_sauce'} == component:
+            local={'mustard':np.array([-.85,.8]),'ketchup':np.array([.8,0]),
+                   'worcestershire_sauce':np.array([-.85,-.8])}
         for name,xy in local.items():
             center=3.1 if full_width else col*3.2+1.45
             radius=2.45 if full_width else 1.05
@@ -1656,6 +1668,40 @@ def relationship_positions(edges, wide=False):
         heights[col]+=height+.35
         if full_width:heights[1]=heights[0]
     return graph,positions,max(heights)
+
+
+def draw_relationship_map(displayed, cohorts, figures):
+    """Draw existing pair scores without recalculating the analysis."""
+    import networkx as nx
+    positions=[];max_ratio=max(r['ratio'] for rows in displayed.values() for r in rows)
+    with mpl.rc_context({'font.family':'sans-serif','font.sans-serif':['DejaVu Sans'],
+            'font.size':8,'svg.fonttype':'none','svg.hashsalt':'HFC-ratio-atlas'}):
+        fig,axes=plt.subplots(2,1,figsize=(7.2,11.4), gridspec_kw={'height_ratios':[1.2,1]})
+        for ax,domain,title in zip(axes,('herbal','food'),('(A) Herbal','(B) Food')):
+            rows=displayed[domain];graph,pos,height=relationship_positions(rows, wide=domain=='food')
+            freq=Counter(x for r in cohorts[domain] for x in r['herbs' if domain=='herbal' else 'ingredients'].split('|'))
+            ratio_lookup={frozenset((r['ingredient_a'],r['ingredient_b'])):r['ratio'] for r in rows}
+            nx.draw_networkx_edges(graph,pos,ax=ax,edge_color='#686868',width=[.5+3*ratio_lookup[frozenset((a,b))]/max_ratio for a,b in graph.edges])
+            nx.draw_networkx_nodes(graph,pos,ax=ax,node_size=25,node_color='white',edgecolors='#444444',linewidths=.7)
+            labels={x:ingredient_display_name(x, wrap=True) for x in graph}
+            displaced={'buttermilk':(0,7),'baking_powder':(0,7),'baking_soda':(0,-8),
+                       '산사':(0,7),'산사육':(0,-7),'맥아':(0,7),
+                       'mustard':(0,7),'ketchup':(0,7),'worcestershire_sauce':(0,-7)}
+            nx.draw_networkx_labels(graph,pos,labels={x:v for x,v in labels.items() if x not in displaced},
+                                    ax=ax,font_family='DejaVu Sans',font_size=8,
+                                    bbox={'facecolor':'white','edgecolor':'none','pad':.35})
+            for name,(dx,dy) in displaced.items():
+                if name in graph:
+                    ax.annotate(labels[name],pos[name],xytext=(dx,dy),textcoords='offset points',
+                                ha='center',va='bottom' if dy>0 else 'top',fontsize=8,
+                                bbox={'facecolor':'white','edgecolor':'none','pad':.35})
+            ax.set_xlim(-.25,6.5);ax.set_ylim(-height-.15,.15);ax.axis('off');ax.set_title(title,loc='left',fontsize=10)
+            positions.extend({'domain':domain,'ingredient':x,'x':float(v[0]),'y':float(v[1]),'unique_occurrences':freq[x]} for x,v in sorted(pos.items()))
+        from matplotlib.lines import Line2D
+        fig.legend(handles=[Line2D([0],[0],color='#686868',lw=.5+3*r/max_ratio,label=f'{r:g}×') for r in (5,20,40)],
+                   title='Co-occurrence ratio',loc='lower center',ncol=3,frameon=False,bbox_to_anchor=(.5,-.005),fontsize=8,title_fontsize=8)
+        fig.tight_layout(rect=[0,.065,1,1]);structure_save(fig,figures,'Figure5_ingredient_relationships')
+    return positions
 
 
 def make_relationship_atlas(work_dir, figures):
@@ -1763,25 +1809,7 @@ def make_relationship_atlas(work_dir, figures):
     for filename,rows in [('ranked_pairs.csv',all_rows),('displayed_pairs.csv',displayed['herbal']+displayed['food']),
                           ('source_examples.csv',examples),('food_pair_stability.csv',stability)]:
         write_csv(out/filename,tuple(rows[0]),rows)
-    positions=[];max_ratio=max(r['ratio'] for rows in displayed.values() for r in rows)
-    with mpl.rc_context({'font.family':'sans-serif','font.sans-serif':['DejaVu Sans'],
-            'font.size':8,'svg.fonttype':'none','svg.hashsalt':'HFC-ratio-atlas'}):
-        fig,axes=plt.subplots(2,1,figsize=(7.2,11.4), gridspec_kw={'height_ratios':[1.5,1]})
-        for ax,domain,title in zip(axes,('herbal','food'),('(A) Herbal','(B) Food')):
-            rows=displayed[domain];graph,pos,height=relationship_positions(rows, wide=domain=='food')
-            freq=Counter(x for r in cohorts[domain] for x in r['herbs' if domain=='herbal' else 'ingredients'].split('|'))
-            ratio_lookup={frozenset((r['ingredient_a'],r['ingredient_b'])):r['ratio'] for r in rows}
-            nx.draw_networkx_edges(graph,pos,ax=ax,edge_color='#686868',width=[.5+3*ratio_lookup[frozenset((a,b))]/max_ratio for a,b in graph.edges])
-            nx.draw_networkx_nodes(graph,pos,ax=ax,node_size=25,node_color='white',edgecolors='#444444',linewidths=.7)
-            labels={x:ingredient_display_name(x, wrap=True) for x in graph}
-            nx.draw_networkx_labels(graph,pos,labels=labels,ax=ax,font_family='DejaVu Sans',font_size=8,
-                                    bbox={'facecolor':'white','edgecolor':'none','pad':.35})
-            ax.set_xlim(-.25,6.5);ax.set_ylim(-height-.15,.15);ax.axis('off');ax.set_title(title,loc='left',fontsize=10)
-            positions.extend({'domain':domain,'ingredient':x,'x':float(v[0]),'y':float(v[1]),'unique_occurrences':freq[x]} for x,v in sorted(pos.items()))
-        from matplotlib.lines import Line2D
-        fig.legend(handles=[Line2D([0],[0],color='#686868',lw=.5+3*r/max_ratio,label=f'{r:g}×') for r in (5,20,40)],
-                   title='Co-occurrence ratio',loc='lower center',ncol=3,frameon=False,bbox_to_anchor=(.5,-.005),fontsize=8,title_fontsize=8)
-        fig.tight_layout(rect=[0,.065,1,1]);structure_save(fig,figures,'Figure5_ingredient_relationships')
+    positions=draw_relationship_map(displayed,cohorts,figures)
     write_csv(out/'network_positions.csv',tuple(positions[0]),positions)
     caption=('Fig. 5. Ingredient relationships relative to frequency-preserving randomization. Counts use the same training data as Fig. 4. '
         '(A) Herbal formulas. (B) Food recipes aggregated across 100 matched samples. Pharmacopoeial names are used for display. Source-record weights are retained. '
