@@ -2,14 +2,19 @@
 
 ## Herbal formulas
 
-The five CSV files in `herbal/` were obtained from the [Korean Public Data Portal](https://www.data.go.kr/). Search for `교과서 처방`.
+The five CSV files in `herbal/` were provided by the Korea Institute of Oriental Medicine through the Korean Public Data Portal. Each dataset contains formulas from a Korean medicine internal medicine textbook.
 
-Each row is one herb in one formula. The analysis uses the formula ID, Korean formula name, and Korean herb name. Dose and unit are not used.
+| Repository file | Official source and download page |
+|---|---|
+| `herbal/liver.csv` | [Liver system (간계내과학)](https://www.data.go.kr/data/15075920/fileData.do) |
+| `herbal/heart.csv` | [Heart system (심계내과학)](https://www.data.go.kr/data/15076000/fileData.do) |
+| `herbal/spleen.csv` | [Spleen system (비계내과학)](https://www.data.go.kr/data/15076001/fileData.do) |
+| `herbal/lung.csv` | [Lung system (폐계내과학)](https://www.data.go.kr/data/15076002/fileData.do) |
+| `herbal/kidney.csv` | [Kidney system (신계내과학)](https://www.data.go.kr/data/15076003/fileData.do) |
 
-```text
-처방아이디,처방한글명,출전,...,약재한글명,...,용량,단위
-FO00700097,도담탕,濟生方,...,반하,...,7.5,g
-```
+To obtain the files from the provider, open each page, choose the CSV download (`다운로드`), and save it under the corresponding filename above in `data/herbal/`. The repository includes the inputs used in this study; future provider updates may differ.
+
+The analysis uses the formula ID (`처방아이디`), Korean formula name (`처방한글명`), and Korean herb name (`약재한글명`). Dose and unit are not used.
 
 ## Food recipes
 
