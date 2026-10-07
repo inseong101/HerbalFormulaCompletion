@@ -1609,6 +1609,36 @@ def relationship_positions(edges, wide=False):
     graph=nx.Graph()
     for r in edges: graph.add_edge(r['ingredient_a'],r['ingredient_b'])
     components=sorted(nx.connected_components(graph),key=lambda c:(-len(c),sorted(c)))
+    if not wide:
+        # Explicit component geometry separates labels from every herb-pair edge.
+        layouts=[
+            {'석곡':(0,1),'육종용':(1,1),'녹용':(0,0),'토사자':(1,2),'파극천':(2,1)},
+            {'가자':(0,0),'육두구':(1,0),'보골지':(1,2),'회향':(2,2)},
+            {'검인':(0,0),'연자육':(1,1),'백편두':(0,2),'의이인':(2,2)},
+            {'금은화':(0,0),'연교':(1,1),'우방자':(2,0),'죽엽':(1,2)},
+            {'백자인':(0,0),'복신':(0,2),'산조인':(2,0),'원지':(2,2)},
+            {'구맥':(0,1),'목통':(1,0),'차전자':(2,1)},
+            {'귀판':(0,0),'우슬':(1,1),'두중':(2,2)},
+            {'당귀미':(0,0),'홍화':(1,1),'도인':(2,2)},
+            {'산사':(0,2),'산사육':(0,0),'맥아':(2,1)},
+        ]
+        positions={};heights=[0.,0.,0.];pairs=[]
+        for component in components:
+            if len(component)==2:
+                pairs.append(sorted(component));continue
+            col=int(np.argmin(heights));names=sorted(component)
+            local=next((v for v in layouts if set(v)==component),None)
+            if local is None:local={names[0]:(0,1),names[1]:(2,1)}
+            height=3.4 if len(component)>2 else 1.55
+            for name,(x,y) in local.items():
+                positions[name]=np.array([col*5.2+.75+1.65*x,-heights[col]-1.0-(2-y)*.95])
+            heights[col]+=height+.65
+        base=max(heights)
+        for i,names in enumerate(pairs):
+            col=i%2;row=i//2
+            for j,name in enumerate(names):
+                positions[name]=np.array([.75+col*7.8+j*4.7,-base-1.-row*2.1])
+        return graph,positions,base+1.9+2.1*((len(pairs)-1)//2)
     positions={};heights=[0.,0.]
     for component in components:
         names=sorted(component);col=int(heights[1]<heights[0]);n=len(names)
@@ -1616,7 +1646,7 @@ def relationship_positions(edges, wide=False):
         if full_width:heights=[max(heights)]*2;col=0
         height=3.5 if full_width else (.85 if n==2 else max(1.5,.55*math.sqrt(n)+.7))
         if n==2:
-            local={names[0]:np.array([-.65,0]),names[1]:np.array([.65,0])}
+            local={names[0]:np.array([-.9,0]),names[1]:np.array([.9,0])}
         else:
             sub=nx.Graph();sub.add_nodes_from(names)
             sub.add_edges_from(sorted((min(a,b),max(a,b)) for a,b in graph.edges if a in component and b in component))
@@ -1676,31 +1706,93 @@ def draw_relationship_map(displayed, cohorts, figures):
     positions=[];max_ratio=max(r['ratio'] for rows in displayed.values() for r in rows)
     with mpl.rc_context({'font.family':'sans-serif','font.sans-serif':['DejaVu Sans'],
             'font.size':8,'svg.fonttype':'none','svg.hashsalt':'HFC-ratio-atlas'}):
-        fig,axes=plt.subplots(2,1,figsize=(7.2,11.4), gridspec_kw={'height_ratios':[1.2,1]})
+        fig,axes=plt.subplots(1,2,figsize=(10.4,7.2), gridspec_kw={'width_ratios':[1.55,1]})
+        panel_geometry=[]
         for ax,domain,title in zip(axes,('herbal','food'),('(A) Herbal','(B) Food')):
             rows=displayed[domain];graph,pos,height=relationship_positions(rows, wide=domain=='food')
             freq=Counter(x for r in cohorts[domain] for x in r['herbs' if domain=='herbal' else 'ingredients'].split('|'))
             ratio_lookup={frozenset((r['ingredient_a'],r['ingredient_b'])):r['ratio'] for r in rows}
             nx.draw_networkx_edges(graph,pos,ax=ax,edge_color='#686868',width=[.5+3*ratio_lookup[frozenset((a,b))]/max_ratio for a,b in graph.edges])
             nx.draw_networkx_nodes(graph,pos,ax=ax,node_size=25,node_color='white',edgecolors='#444444',linewidths=.7)
-            labels={x:ingredient_display_name(x, wrap=True) for x in graph}
-            displaced={'buttermilk':(0,7),'baking_powder':(0,7),'baking_soda':(0,-8),
-                       '산사':(0,7),'산사육':(0,-7),'맥아':(0,7),
-                       'mustard':(0,7),'ketchup':(0,7),'worcestershire_sauce':(0,-7)}
-            nx.draw_networkx_labels(graph,pos,labels={x:v for x,v in labels.items() if x not in displaced},
-                                    ax=ax,font_family='DejaVu Sans',font_size=8,
-                                    bbox={'facecolor':'white','edgecolor':'none','pad':.35})
-            for name,(dx,dy) in displaced.items():
-                if name in graph:
-                    ax.annotate(labels[name],pos[name],xytext=(dx,dy),textcoords='offset points',
-                                ha='center',va='bottom' if dy>0 else 'top',fontsize=8,
-                                bbox={'facecolor':'white','edgecolor':'none','pad':.35})
-            ax.set_xlim(-.25,6.5);ax.set_ylim(-height-.15,.15);ax.axis('off');ax.set_title(title,loc='left',fontsize=10)
+            import textwrap
+            labels={x:'\n'.join(textwrap.wrap(ingredient_display_name(x), width=14 if domain=='herbal' else 19,
+                         break_long_words=False, break_on_hyphens=False)) for x in graph}
+            if domain=='food':labels['baking_soda']='baking\nsoda'
+            texts={name:ax.annotate(labels[name],pos[name],xytext=(0,0),
+                      textcoords='offset points',ha='center',va='center',fontsize=8,
+                      annotation_clip=False) for name in graph}
+            ax.set_xlim(-.65,15.9) if domain=='herbal' else ax.set_xlim(-.9,7.15)
+            ax.set_ylim(-height-.2,.8);ax.axis('off');ax.set_title(title,loc='left',fontsize=11)
+            panel_geometry.append((ax,graph,pos,texts,ratio_lookup))
             positions.extend({'domain':domain,'ingredient':x,'x':float(v[0]),'y':float(v[1]),'unique_occurrences':freq[x]} for x,v in sorted(pos.items()))
         from matplotlib.lines import Line2D
         fig.legend(handles=[Line2D([0],[0],color='#686868',lw=.5+3*r/max_ratio,label=f'{r:g}×') for r in (5,20,40)],
                    title='Co-occurrence ratio',loc='lower center',ncol=3,frameon=False,bbox_to_anchor=(.5,-.005),fontsize=8,title_fontsize=8)
-        fig.tight_layout(rect=[0,.065,1,1]);structure_save(fig,figures,'Figure5_ingredient_relationships')
+        fig.subplots_adjust(left=.015,right=.985,top=.925,bottom=.11,wspace=.07)
+        fig.canvas.draw()
+        renderer=fig.canvas.get_renderer()
+        from matplotlib.transforms import Bbox
+        def line_hits_box(a,b,box):
+            lo,hi=0.,1.
+            for k,lower,upper in ((0,box.x0,box.x1),(1,box.y0,box.y1)):
+                delta=b[k]-a[k]
+                if abs(delta)<1e-12:
+                    if not lower<=a[k]<=upper:return False
+                else:
+                    u,v=(lower-a[k])/delta,(upper-a[k])/delta
+                    lo=max(lo,min(u,v));hi=min(hi,max(u,v))
+                    if lo>hi:return False
+            return True
+        audit=[]
+        for ax,graph,pos,texts,ratios in panel_geometry:
+            points={n:ax.transData.transform(pos[n]) for n in graph}
+            segments=[(points[a],points[b],(.5+3*ratios[frozenset((a,b))]/max_ratio)*fig.dpi/144)
+                      for a,b in graph.edges]
+            node_radius=4.2*fig.dpi/72
+            placed=[]
+            # Place constrained hub labels first; each candidate must clear every edge and node.
+            order=sorted(graph,key=lambda n:(-graph.degree[n],-len(texts[n].get_text()),n))
+            for name in order:
+                text=texts[name];box=text.get_window_extent(renderer)
+                width,height=box.width+3,box.height+3
+                origin=points[name];candidates=[]
+                for gap in (7,11,16,23,32,44,58,75):
+                    for angle in np.arange(0,360,15):
+                        rad=math.radians(angle);ux,uy=math.cos(rad),math.sin(rad)
+                        dx=ux*(width/2+gap*fig.dpi/72)
+                        dy=uy*(height/2+gap*fig.dpi/72)
+                        center=origin+np.array([dx,dy])
+                        rect=Bbox.from_bounds(center[0]-width/2,center[1]-height/2,width,height)
+                        if rect.x0<ax.bbox.x0 or rect.x1>ax.bbox.x1 or rect.y0<ax.bbox.y0 or rect.y1>ax.bbox.y1:continue
+                        def box_distance(point):
+                            return math.hypot(max(rect.x0-point[0],0,point[0]-rect.x1),
+                                              max(rect.y0-point[1],0,point[1]-rect.y1))
+                        own_distance=box_distance(origin)
+                        if own_distance>26*fig.dpi/72:continue
+                        if any(box_distance(point)<own_distance+1 for other,point in points.items() if other!=name):continue
+                        if any(rect.overlaps(other) for other in placed):continue
+                        if any(rect.padded(node_radius).contains(*v) for v in points.values()):continue
+                        if any(line_hits_box(a,b,rect.padded(stroke+2)) for a,b,stroke in segments):continue
+                        distance=math.hypot(dx,dy)
+                        # Prefer vertical labels when equally close to their node.
+                        candidates.append((distance+abs(ux)*3,dx,dy,rect))
+                    if candidates:break
+                if not candidates:raise ValueError('No unobstructed label position: '+name)
+                _,dx,dy,rect=min(candidates,key=lambda v:v[0])
+                text.set_position((dx*72/fig.dpi,dy*72/fig.dpi));placed.append(rect)
+            fig.canvas.draw()
+            boxes=[t.get_window_extent(renderer).padded(1) for t in texts.values()]
+            label_collisions=sum(a.overlaps(b) for i,a in enumerate(boxes) for b in boxes[i+1:])
+            node_collisions=sum(box.padded(node_radius).contains(*v) for box in boxes for v in points.values())
+            edge_collisions=sum(line_hits_box(a,b,box.padded(stroke+1)) for box in boxes for a,b,stroke in segments)
+            if label_collisions or node_collisions or edge_collisions:
+                raise AssertionError('Relationship map label collision')
+            audit.append({'panel':ax.get_title(loc='left'),'nodes':len(graph),'edges':len(graph.edges),
+                          'label_label_overlaps':int(label_collisions),'label_node_overlaps':int(node_collisions),
+                          'label_edge_overlaps':int(edge_collisions)})
+        Path(figures).mkdir(parents=True,exist_ok=True)
+        (Path(figures)/'Figure5_layout_validation.json').write_text(json.dumps(audit,indent=2)+'\n')
+        structure_save(fig,figures,'Figure5_ingredient_relationships')
     return positions
 
 

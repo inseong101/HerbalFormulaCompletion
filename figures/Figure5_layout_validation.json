@@ -1,0 +1,18 @@
+[
+  {
+    "panel": "(A) Herbal",
+    "nodes": 41,
+    "edges": 30,
+    "label_label_overlaps": 0,
+    "label_node_overlaps": 0,
+    "label_edge_overlaps": 0
+  },
+  {
+    "panel": "(B) Food",
+    "nodes": 32,
+    "edges": 30,
+    "label_label_overlaps": 0,
+    "label_node_overlaps": 0,
+    "label_edge_overlaps": 0
+  }
+]
